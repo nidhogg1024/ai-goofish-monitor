@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import time
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlencode
@@ -69,6 +70,128 @@ class RiskControlError(Exception):
 
 class LoginRequiredError(Exception):
     """Raised when Goofish redirects to the passport/mini_login flow."""
+
+
+class InteractiveRecoveryRequested(Exception):
+    """Raised when a visible-browser recovery succeeded and the task should retry."""
+
+
+_LOGIN_WAIT_TIMEOUT = 180  # 等待扫码登录的超时时间（秒）
+_AUTH_COOKIE_NAMES = {"tracknick", "cookie2", "unb"}
+_LOGIN_ENTRY_SELECTORS = (
+    "text=登录",
+    "text=去登录",
+    "button:has-text('登录')",
+    "a:has-text('登录')",
+)
+_RISK_WIDGET_SELECTORS = (
+    "div.baxia-dialog-mask",
+    "div.J_MIDDLEWARE_FRAME_WIDGET",
+)
+
+
+def _has_valid_auth_cookie_values(cookies) -> bool:
+    for cookie in cookies:
+        name = str(cookie.get("name", "")).strip()
+        value = str(cookie.get("value", "")).strip()
+        if name not in _AUTH_COOKIE_NAMES:
+            continue
+        if value and value.lower() not in {"deleted", "null", "undefined"}:
+            return True
+    return False
+
+
+async def _has_visible_login_entry(page) -> bool:
+    for selector in _LOGIN_ENTRY_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            if await locator.is_visible(timeout=600):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _has_visible_risk_overlay(page) -> bool:
+    for selector in _RISK_WIDGET_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            if await locator.is_visible(timeout=600):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _is_authenticated_session(page, context, *, require_clear_page: bool = True) -> bool:
+    cookies = await context.cookies()
+    if not _has_valid_auth_cookie_values(cookies):
+        return False
+    if not require_clear_page:
+        return True
+    if _is_login_url(page.url):
+        return False
+    if await _has_visible_login_entry(page):
+        return False
+    if await _has_visible_risk_overlay(page):
+        return False
+    return True
+
+
+async def _save_storage_state(context, state_file: str) -> None:
+    storage_state = await context.storage_state()
+    state_dir = os.path.dirname(state_file)
+    if state_dir:
+        os.makedirs(state_dir, exist_ok=True)
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(storage_state, f, ensure_ascii=False, indent=2)
+
+
+async def _click_login_entry(page) -> bool:
+    for selector in _LOGIN_ENTRY_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            if await locator.is_visible(timeout=1000):
+                await locator.click(timeout=1500)
+                await page.wait_for_timeout(1000)
+                return True
+        except Exception:
+            continue
+    return _is_login_url(page.url)
+
+
+async def _wait_for_login(page, context, state_file: str, *, timeout: int = _LOGIN_WAIT_TIMEOUT) -> bool:
+    """检测到需要登录时，等待用户扫码完成，保存状态后返回 True；超时返回 False。"""
+    print("\n" + "=" * 60)
+    print("🔑 检测到需要登录，请在浏览器中扫码完成登录。")
+    print(f"   等待时间：最多 {timeout} 秒")
+    print("=" * 60 + "\n")
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if page.is_closed():
+                print("⚠️  浏览器页面已关闭，无法继续等待登录。")
+                return False
+            if await _is_authenticated_session(page, context):
+                print("\n✅ 扫码登录成功！正在保存登录状态...")
+                await _save_storage_state(context, state_file)
+                print(f"✅ 登录状态已保存到 {state_file}")
+                # 等一下让页面稳定
+                await asyncio.sleep(2)
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+
+    print("\n⏰ 等待扫码登录超时，任务将中止。")
+    return False
 
 
 FAILURE_GUARD = FailureGuard()
@@ -338,6 +461,102 @@ def _build_extra_headers(raw_headers: Optional[dict]) -> dict:
     return headers
 
 
+async def _interactive_recover_session(
+    state_file: str,
+    *,
+    target_url: Optional[str],
+    reason: str,
+    proxy_server: Optional[str] = None,
+    timeout: int = _LOGIN_WAIT_TIMEOUT,
+) -> bool:
+    print("\n" + "=" * 66)
+    print("⚠️  任务在无头模式下触发了登录/风控校验。")
+    print(f"原因: {reason}")
+    print("即将临时打开一个可见浏览器窗口，请手动完成扫码或验证。")
+    print("完成后系统会自动保存登录状态，并回到无头模式继续重试。")
+    print("=" * 66 + "\n")
+
+    snapshot_data = None
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                snapshot_data = json.load(f)
+        except Exception as e:
+            print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
+
+    async with async_playwright() as p:
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-web-security",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--start-maximized",
+        ]
+        launch_kwargs = {"headless": False, "args": launch_args}
+        if proxy_server:
+            launch_kwargs["proxy"] = {"server": proxy_server}
+        launch_kwargs["channel"] = _resolve_browser_channel()
+
+        browser = await p.chromium.launch(**launch_kwargs)
+        try:
+            context_kwargs = _default_context_options()
+            storage_state_arg = state_file if os.path.exists(state_file) else None
+            if isinstance(snapshot_data, dict):
+                if any(
+                    key in snapshot_data for key in ("env", "headers", "page", "storage")
+                ):
+                    storage_state_arg = {"cookies": snapshot_data.get("cookies", [])}
+                    context_kwargs.update(_build_context_overrides(snapshot_data))
+                    extra_headers = _build_extra_headers(snapshot_data.get("headers"))
+                    if extra_headers:
+                        context_kwargs["extra_http_headers"] = extra_headers
+                else:
+                    storage_state_arg = snapshot_data
+
+            context = await browser.new_context(
+                storage_state=storage_state_arg,
+                **_clean_kwargs(context_kwargs),
+            )
+            try:
+                await context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+                    window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
+                    Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5});
+                """)
+            except Exception:
+                pass
+
+            page = await context.new_page()
+            destination = target_url or "https://www.goofish.com/"
+            await page.goto(destination, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(1200)
+            await _click_login_entry(page)
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if page.is_closed():
+                    print("⚠️  交互恢复窗口已关闭，未能完成恢复。")
+                    return False
+                if await _is_authenticated_session(page, context):
+                    await page.wait_for_timeout(1200)
+                    if not await _is_authenticated_session(page, context):
+                        await asyncio.sleep(1.0)
+                        continue
+                    await _save_storage_state(context, state_file)
+                    print(f"✅ 交互恢复成功，登录状态已更新到 {state_file}")
+                    return True
+                await asyncio.sleep(1.5)
+
+            print("⏰ 交互恢复等待超时，本次任务将中止。")
+            return False
+        finally:
+            await browser.close()
+
+
 async def scrape_user_profile(context, user_id: str) -> dict:
     """
     【新版】访问指定用户的个人主页，按顺序采集其摘要信息、完整的商品列表和完整的评价列表。
@@ -540,14 +759,17 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         stop_scraping = False
 
         if not os.path.exists(state_file):
-            raise FileNotFoundError(f"登录状态文件不存在: {state_file}")
+            if RUN_HEADLESS:
+                raise FileNotFoundError(f"登录状态文件不存在: {state_file}（headless 模式无法扫码，请先完成登录）")
+            print(f"⚠️  登录状态文件不存在: {state_file}，将打开浏览器等待扫码登录。")
 
         snapshot_data = None
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                snapshot_data = json.load(f)
-        except Exception as e:
-            print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    snapshot_data = json.load(f)
+            except Exception as e:
+                print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
 
         async with async_playwright() as p:
             # 反检测启动参数
@@ -569,7 +791,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             browser = await p.chromium.launch(**launch_kwargs)
 
             context_kwargs = _default_context_options()
-            storage_state_arg = state_file
+            storage_state_arg = state_file if os.path.exists(state_file) else None
             analysis_dispatcher: Optional[ItemAnalysisDispatcher] = None
 
             if isinstance(snapshot_data, dict):
@@ -662,9 +884,23 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         search_url, wait_until="domcontentloaded", timeout=60000
                     )
                 if _is_login_url(page.url):
-                    raise LoginRequiredError(
-                        f"Login required: redirected to {page.url} (cookies/state likely expired)"
-                    )
+                    if RUN_HEADLESS:
+                        recovered = await _interactive_recover_session(
+                            state_file,
+                            target_url=search_url,
+                            reason=f"跳转到登录页: {page.url}",
+                            proxy_server=proxy_server,
+                        )
+                        if recovered:
+                            raise InteractiveRecoveryRequested("已完成交互登录，准备重新执行任务。")
+                        raise LoginRequiredError(
+                            f"Login required: redirected to {page.url} (交互恢复未完成)"
+                        )
+                    logged_in = await _wait_for_login(page, context, state_file)
+                    if not logged_in:
+                        raise LoginRequiredError("扫码登录超时，任务中止。")
+                    # 登录成功后重新导航到搜索页
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
 
                 # 捕获初始搜索的API数据
                 initial_response = await initial_response_info.value
@@ -674,10 +910,25 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     await page.wait_for_selector("text=新发布", timeout=15000)
                 except PlaywrightTimeoutError as e:
                     if _is_login_url(page.url):
-                        raise LoginRequiredError(
-                            f"Login required: redirected to {page.url} (cookies/state likely expired)"
-                        ) from e
-                    raise
+                        if RUN_HEADLESS:
+                            recovered = await _interactive_recover_session(
+                                state_file,
+                                target_url=search_url,
+                                reason=f"等待搜索页时跳转到登录页: {page.url}",
+                                proxy_server=proxy_server,
+                            )
+                            if recovered:
+                                raise InteractiveRecoveryRequested("已完成交互登录，准备重新执行任务。") from e
+                            raise LoginRequiredError(
+                                f"Login required: redirected to {page.url} (交互恢复未完成)"
+                            ) from e
+                        logged_in = await _wait_for_login(page, context, state_file)
+                        if not logged_in:
+                            raise LoginRequiredError("扫码登录超时，任务中止。") from e
+                        await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_selector("text=新发布", timeout=15000)
+                    else:
+                        raise
 
                 # 模拟真实用户行为：页面加载后的初始停留和浏览
                 log_time("[反爬] 模拟用户查看页面...")
@@ -692,18 +943,29 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     print(
                         "\n==================== CRITICAL BLOCK DETECTED ===================="
                     )
-                    print("检测到闲鱼反爬虫验证弹窗 (baxia-dialog)，无法继续操作。")
-                    print("这通常是因为操作过于频繁或被识别为机器人。")
-                    print("建议：")
-                    print("1. 停止脚本一段时间再试。")
-                    print(
-                        "2. (推荐) 在 .env 文件中设置 RUN_HEADLESS=false，以非无头模式运行，这有助于绕过检测。"
-                    )
-                    print(f"任务 '{keyword}' 将在此处中止。")
-                    print(
-                        "==================================================================="
-                    )
-                    raise RiskControlError("baxia-dialog")
+                    print("检测到闲鱼反爬虫验证弹窗 (baxia-dialog)。")
+                    if RUN_HEADLESS:
+                        recovered = await _interactive_recover_session(
+                            state_file,
+                            target_url=page.url,
+                            reason="触发 baxia-dialog 验证弹窗",
+                            proxy_server=proxy_server,
+                        )
+                        print("===================================================================")
+                        if recovered:
+                            raise InteractiveRecoveryRequested("已完成交互验证，准备重新执行任务。")
+                        raise RiskControlError("baxia-dialog")
+                    print("请在浏览器中手动完成验证（滑动验证码等），完成后将自动继续。")
+                    print(f"等待时间：最多 {_LOGIN_WAIT_TIMEOUT} 秒")
+                    print("===================================================================")
+                    # 等待弹窗消失（用户手动完成验证后弹窗会关闭）
+                    try:
+                        await baxia_dialog.wait_for(state="hidden", timeout=_LOGIN_WAIT_TIMEOUT * 1000)
+                        print("✅ 验证通过，继续执行任务。")
+                        await random_sleep(1, 2)
+                    except PlaywrightTimeoutError:
+                        print("⏰ 等待验证超时，任务将中止。")
+                        raise RiskControlError("baxia-dialog 验证超时")
                 except PlaywrightTimeoutError:
                     # 2秒内弹窗未出现，这是正常情况，继续执行
                     pass
@@ -714,19 +976,28 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     print(
                         "\n==================== CRITICAL BLOCK DETECTED ===================="
                     )
-                    print(
-                        "检测到闲鱼反爬虫验证弹窗 (J_MIDDLEWARE_FRAME_WIDGET)，无法继续操作。"
-                    )
-                    print("这通常是因为操作过于频繁或被识别为机器人。")
-                    print("建议：")
-                    print("1. 停止脚本一段时间再试。")
-                    print("2. (推荐) 更新登录状态文件，确保登录状态有效。")
-                    print("3. 降低任务执行频率，避免被识别为机器人。")
-                    print(f"任务 '{keyword}' 将在此处中止。")
-                    print(
-                        "==================================================================="
-                    )
-                    raise RiskControlError("J_MIDDLEWARE_FRAME_WIDGET")
+                    print("检测到闲鱼验证弹窗 (J_MIDDLEWARE_FRAME_WIDGET)。")
+                    if RUN_HEADLESS:
+                        recovered = await _interactive_recover_session(
+                            state_file,
+                            target_url=page.url,
+                            reason="触发 J_MIDDLEWARE_FRAME_WIDGET 验证弹窗",
+                            proxy_server=proxy_server,
+                        )
+                        print("===================================================================")
+                        if recovered:
+                            raise InteractiveRecoveryRequested("已完成交互验证，准备重新执行任务。")
+                        raise RiskControlError("J_MIDDLEWARE_FRAME_WIDGET")
+                    print("请在浏览器中手动完成验证，完成后将自动继续。")
+                    print(f"等待时间：最多 {_LOGIN_WAIT_TIMEOUT} 秒")
+                    print("===================================================================")
+                    try:
+                        await middleware_widget.wait_for(state="hidden", timeout=_LOGIN_WAIT_TIMEOUT * 1000)
+                        print("✅ 验证通过，继续执行任务。")
+                        await random_sleep(1, 2)
+                    except PlaywrightTimeoutError:
+                        print("⏰ 等待验证超时，任务将中止。")
+                        raise RiskControlError("J_MIDDLEWARE_FRAME_WIDGET 验证超时")
                 except PlaywrightTimeoutError:
                     # 2秒内弹窗未出现，这是正常情况，继续执行
                     pass
@@ -1145,9 +1416,23 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
             except PlaywrightTimeoutError as e:
                 if _is_login_url(page.url):
-                    raise LoginRequiredError(
-                        f"Login required: redirected to {page.url} (cookies/state likely expired)"
-                    ) from e
+                    if RUN_HEADLESS:
+                        recovered = await _interactive_recover_session(
+                            state_file,
+                            target_url=search_url,
+                            reason=f"超时后跳转到登录页: {page.url}",
+                            proxy_server=proxy_server,
+                        )
+                        if recovered:
+                            raise InteractiveRecoveryRequested("已完成交互登录，准备重新执行任务。") from e
+                        raise LoginRequiredError(
+                            f"Login required: redirected to {page.url} (交互恢复未完成)"
+                        ) from e
+                    logged_in = await _wait_for_login(page, context, state_file)
+                    if not logged_in:
+                        raise LoginRequiredError("扫码登录超时，任务中止。") from e
+                    # 登录成功但当前页面状态已乱，抛异常触发重试
+                    raise LoginRequiredError("登录成功，需要重新执行任务。") from e
                 print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{e}")
                 raise
             except asyncio.CancelledError:
@@ -1158,6 +1443,19 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     log_time("浏览器已关闭，忽略后续异常（可能是任务被停止）。")
                     return processed_item_count
                 if "passport.goofish.com" in str(e):
+                    if RUN_HEADLESS:
+                        recovered = await _interactive_recover_session(
+                            state_file,
+                            target_url=search_url,
+                            reason=f"异常中触发 passport 登录流: {e}",
+                            proxy_server=proxy_server,
+                        )
+                        if recovered:
+                            raise InteractiveRecoveryRequested("已完成交互登录，准备重新执行任务。") from e
+                    else:
+                        logged_in = await _wait_for_login(page, context, state_file)
+                        if logged_in:
+                            raise LoginRequiredError("登录成功，需要重新执行任务。") from e
                     raise LoginRequiredError(
                         f"Login required: redirected to passport flow ({e})"
                     ) from e
@@ -1222,10 +1520,16 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         cleanup_task_images(task_config.get("task_name", "default"))
         return 0
 
-    for attempt in range(1, attempt_limit + 1):
+    interactive_recovery_budget = 2
+    max_attempts = attempt_limit + interactive_recovery_budget
+    retry_same_assignment = False
+    attempt = 1
+    while attempt <= max_attempts:
         if attempt == 1:
             selected_account = _select_account()
             selected_proxy = _select_proxy()
+        elif retry_same_assignment:
+            retry_same_assignment = False
         else:
             if (
                 rotation_settings["account_enabled"]
@@ -1266,6 +1570,16 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             last_error = ""
             FAILURE_GUARD.record_success(task_name_for_guard)
             break
+        except InteractiveRecoveryRequested as e:
+            print(f"交互恢复完成: {e}")
+            last_error = ""
+            if interactive_recovery_budget > 0:
+                interactive_recovery_budget -= 1
+                retry_same_assignment = True
+                attempt += 1
+                continue
+            last_error = str(e)
+            break
         except LoginRequiredError as e:
             last_error = str(e)
             print(f"检测到登录失效/重定向: {e}")
@@ -1278,8 +1592,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
             print(f"本次尝试失败: {last_error}")
-            if attempt < attempt_limit:
+            if attempt < max_attempts:
                 print("将尝试轮换账号/IP 后重试...")
+        attempt += 1
 
     if last_error:
         await _notify_task_failure(task_config, last_error, cookie_path=last_state_path)

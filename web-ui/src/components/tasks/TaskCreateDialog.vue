@@ -13,6 +13,7 @@ import { toast } from '@/components/ui/toast'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -129,6 +130,7 @@ watch(pollingError, (value) => {
     <DialogContent class="sm:max-w-[640px] max-h-[85vh] overflow-y-auto">
       <DialogHeader>
         <DialogTitle>{{ t('tasks.createDialog.title') }}</DialogTitle>
+        <DialogDescription>{{ t('tasks.createDialog.description') }}</DialogDescription>
       </DialogHeader>
       <TaskForm
         mode="create"

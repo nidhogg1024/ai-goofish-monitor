@@ -59,6 +59,34 @@ export interface AiSettings {
   PROXY_URL?: string
 }
 
+export interface AiModelListRequest {
+  OPENAI_API_KEY?: string
+  OPENAI_BASE_URL?: string
+  PROXY_URL?: string
+}
+
+export interface AiModelListResponse {
+  models: string[]
+  source_url: string
+}
+
+export interface AiModelProbeRequest extends AiModelListRequest {
+  models: string[]
+  force_refresh?: boolean
+}
+
+export interface AiModelProbeItem {
+  model: string
+  available: boolean
+  message: string
+  checked_at: string
+  cached: boolean
+}
+
+export interface AiModelProbeResponse {
+  items: AiModelProbeItem[]
+}
+
 export interface RotationSettings {
   ACCOUNT_ROTATION_ENABLED?: boolean
   ACCOUNT_ROTATION_MODE?: string
@@ -152,6 +180,22 @@ export async function testAiSettings(settings: AiSettings): Promise<{ success: b
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings)
+  })
+}
+
+export async function listAiModels(settings: AiModelListRequest): Promise<AiModelListResponse> {
+  return await http('/api/settings/ai/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings)
+  })
+}
+
+export async function probeAiModels(payload: AiModelProbeRequest): Promise<AiModelProbeResponse> {
+  return await http('/api/settings/ai/models/probe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   })
 }
 

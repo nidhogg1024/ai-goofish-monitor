@@ -294,8 +294,8 @@ class TaskGenerateRequest(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    task_name: str
-    keyword: str
+    task_name: Optional[str] = None
+    keyword: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     personal_only: bool = True
@@ -349,10 +349,14 @@ class TaskGenerateRequest(BaseModel):
     @model_validator(mode="after")
     def validate_decision_mode_payload(self):
         description = str(self.description or "").strip()
+        keyword = str(self.keyword or "").strip()
         if self.decision_mode == "ai" and not description:
             raise ValueError("AI 判断模式下，详细需求(description)不能为空。")
-        if self.decision_mode == "keyword" and not _has_keyword_rules(self.keyword_rules):
-            raise ValueError("关键词判断模式下，至少需要一个关键词。")
+        if self.decision_mode == "keyword":
+            if not keyword:
+                raise ValueError("关键词判断模式下，搜索关键词(keyword)不能为空。")
+            if not _has_keyword_rules(self.keyword_rules):
+                raise ValueError("关键词判断模式下，至少需要一个关键词。")
         if self.account_strategy == "fixed" and not self.account_state_file:
             raise ValueError("固定账号模式下必须选择账号。")
         return self

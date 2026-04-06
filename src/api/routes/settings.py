@@ -1,9 +1,13 @@
 """
 设置管理路由
 """
+import asyncio
 import os
+import time
 from typing import Optional
+from urllib.parse import urlparse
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -22,8 +26,10 @@ from src.services.ai_request_compat import (
     create_ai_response_sync,
     is_chat_completions_api_unsupported_error,
     is_responses_api_unsupported_error,
+    is_stream_required_error,
 )
 from src.services.ai_response_parser import extract_ai_response_content
+from src.services.ai_base_url import normalize_openai_base_url
 from src.services.notification_config_service import (
     NotificationSettingsValidationError,
     build_configured_channels,
@@ -41,6 +47,10 @@ from src.services.process_service import ProcessService
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 AI_TEST_PROMPT = "Reply with OK only."
 AI_TEST_MAX_OUTPUT_TOKENS = 32
+AI_MODEL_PROBE_CACHE_TTL_SECONDS = 600
+AI_MODEL_PROBE_CONCURRENCY = 4
+
+_AI_MODEL_PROBE_CACHE: dict[tuple[str, str], dict] = {}
 
 
 def _reload_env() -> None:
@@ -67,6 +77,139 @@ def _env_int(key: str, default: int) -> int:
 
 def _normalize_bool_value(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _resolve_ai_value(submitted: Optional[str], key: str) -> str:
+    value = (submitted or "").strip()
+    if value:
+        return normalize_openai_base_url(value) if key == "OPENAI_BASE_URL" else value
+    stored = env_manager.get_value(key, "")
+    text = (stored or "").strip()
+    return normalize_openai_base_url(text) if key == "OPENAI_BASE_URL" else text
+
+
+def _build_model_catalog_urls(base_url: str) -> list[str]:
+    normalized = base_url.rstrip("/")
+    candidates = [f"{normalized}/models"]
+    path = (urlparse(normalized).path or "").rstrip("/")
+    if not path.endswith("/v1"):
+        candidates.append(f"{normalized}/v1/models")
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            unique.append(candidate)
+            seen.add(candidate)
+    return unique
+
+
+def _extract_model_ids(payload: object) -> list[str]:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), list):
+            entries = payload["data"]
+        elif isinstance(payload.get("models"), list):
+            entries = payload["models"]
+        elif isinstance(payload.get("result"), list):
+            entries = payload["result"]
+        else:
+            entries = []
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        entries = []
+
+    model_ids: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            candidate = entry.strip()
+        elif isinstance(entry, dict):
+            candidate = str(
+                entry.get("id")
+                or entry.get("model")
+                or entry.get("name")
+                or ""
+            ).strip()
+        else:
+            candidate = ""
+
+        if candidate and candidate not in model_ids:
+            model_ids.append(candidate)
+    return model_ids
+
+
+def _cache_probe_result(base_url: str, model: str, result: dict) -> None:
+    _AI_MODEL_PROBE_CACHE[(base_url, model)] = {
+        **result,
+        "cached_at": time.time(),
+    }
+
+
+def _get_cached_probe_result(base_url: str, model: str) -> dict | None:
+    cached = _AI_MODEL_PROBE_CACHE.get((base_url, model))
+    if not cached:
+        return None
+    if time.time() - float(cached.get("cached_at", 0)) > AI_MODEL_PROBE_CACHE_TTL_SECONDS:
+        _AI_MODEL_PROBE_CACHE.pop((base_url, model), None)
+        return None
+    return dict(cached)
+
+
+def _run_ai_test_request(
+    *,
+    api_key: str,
+    base_url: str,
+    proxy_url: str,
+    model_name: str,
+) -> dict:
+    from openai import OpenAI
+
+    use_stream = False
+    client_params = {
+        "api_key": api_key,
+        "base_url": base_url,
+        "timeout": httpx.Timeout(30.0),
+    }
+    if proxy_url:
+        client_params["http_client"] = httpx.Client(proxy=proxy_url)
+
+    client = OpenAI(**client_params)
+    messages = [{"role": "user", "content": AI_TEST_PROMPT}]
+    api_mode = CHAT_COMPLETIONS_API_MODE
+
+    while True:
+        try:
+            response = create_ai_response_sync(
+                client,
+                api_mode,
+                build_ai_request_params(
+                    api_mode,
+                    model=model_name,
+                    messages=messages,
+                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
+                    stream=use_stream,
+                ),
+            )
+            return {
+                "success": True,
+                "message": "AI模型连接测试成功！",
+                "response": extract_ai_response_content(response),
+            }
+        except Exception as exc:
+            if api_mode == CHAT_COMPLETIONS_API_MODE and is_stream_required_error(exc) and not use_stream:
+                use_stream = True
+                continue
+            if api_mode == CHAT_COMPLETIONS_API_MODE and is_chat_completions_api_unsupported_error(exc):
+                api_mode = RESPONSES_API_MODE
+                continue
+            return {
+                "success": False,
+                "message": f"AI模型连接测试失败: {exc}",
+            }
 
 
 class NotificationSettingsModel(BaseModel):
@@ -104,6 +247,31 @@ class AISettingsModel(BaseModel):
     OPENAI_MODEL_NAME: Optional[str] = None
     SKIP_AI_ANALYSIS: Optional[bool] = None
     PROXY_URL: Optional[str] = None
+
+
+class AIModelListResponse(BaseModel):
+    models: list[str]
+    source_url: str
+
+
+class AIModelProbeRequest(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    force_refresh: bool = False
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: Optional[str] = None
+    PROXY_URL: Optional[str] = None
+
+
+class AIModelProbeItem(BaseModel):
+    model: str
+    available: bool
+    message: str
+    checked_at: str
+    cached: bool = False
+
+
+class AIModelProbeResponse(BaseModel):
+    items: list[AIModelProbeItem]
 
 
 class RotationSettingsModel(BaseModel):
@@ -255,7 +423,7 @@ async def get_system_status(
 @router.get("/ai")
 async def get_ai_settings():
     return {
-        "OPENAI_BASE_URL": env_manager.get_value("OPENAI_BASE_URL", ""),
+        "OPENAI_BASE_URL": normalize_openai_base_url(env_manager.get_value("OPENAI_BASE_URL", "")),
         "OPENAI_MODEL_NAME": env_manager.get_value("OPENAI_MODEL_NAME", ""),
         "SKIP_AI_ANALYSIS": env_manager.get_value("SKIP_AI_ANALYSIS", "false").lower() == "true",
         "PROXY_URL": env_manager.get_value("PROXY_URL", ""),
@@ -268,7 +436,7 @@ async def update_ai_settings(settings: AISettingsModel):
     if settings.OPENAI_API_KEY is not None:
         updates["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
     if settings.OPENAI_BASE_URL is not None:
-        updates["OPENAI_BASE_URL"] = settings.OPENAI_BASE_URL
+        updates["OPENAI_BASE_URL"] = normalize_openai_base_url(settings.OPENAI_BASE_URL)
     if settings.OPENAI_MODEL_NAME is not None:
         updates["OPENAI_MODEL_NAME"] = settings.OPENAI_MODEL_NAME
     if settings.SKIP_AI_ANALYSIS is not None:
@@ -286,62 +454,106 @@ async def update_ai_settings(settings: AISettingsModel):
 @router.post("/ai/test")
 async def test_ai_settings(settings: dict):
     """测试AI模型设置是否有效"""
-    try:
-        from openai import OpenAI
-        import httpx
+    api_key = _resolve_ai_value(settings.get("OPENAI_API_KEY"), "OPENAI_API_KEY")
+    base_url = _resolve_ai_value(settings.get("OPENAI_BASE_URL"), "OPENAI_BASE_URL")
+    proxy_url = _resolve_ai_value(settings.get("PROXY_URL"), "PROXY_URL")
+    model_name = (
+        str(settings.get("OPENAI_MODEL_NAME") or "").strip()
+        or env_manager.get_value("OPENAI_MODEL_NAME", "")
+    )
+    return _run_ai_test_request(
+        api_key=api_key,
+        base_url=base_url,
+        proxy_url=proxy_url,
+        model_name=model_name,
+    )
 
-        stored_api_key = env_manager.get_value("OPENAI_API_KEY", "")
-        submitted_api_key = settings.get("OPENAI_API_KEY", "")
-        api_key = submitted_api_key or stored_api_key
 
-        client_params = {
-            "api_key": api_key,
-            "base_url": settings.get("OPENAI_BASE_URL", ""),
-            "timeout": httpx.Timeout(30.0),
-        }
+@router.post("/ai/models", response_model=AIModelListResponse)
+async def list_ai_models(settings: AISettingsModel):
+    api_key = _resolve_ai_value(settings.OPENAI_API_KEY, "OPENAI_API_KEY")
+    base_url = _resolve_ai_value(settings.OPENAI_BASE_URL, "OPENAI_BASE_URL")
+    proxy_url = _resolve_ai_value(settings.PROXY_URL, "PROXY_URL")
 
-        proxy_url = settings.get("PROXY_URL", "")
-        if proxy_url:
-            client_params["http_client"] = httpx.Client(proxy=proxy_url)
+    if not base_url:
+        raise HTTPException(status_code=422, detail="请先填写 API Base URL")
+    if not api_key:
+        raise HTTPException(status_code=422, detail="请先填写 API Key，或先保存已有配置")
 
-        model_name = settings.get("OPENAI_MODEL_NAME", "")
-        client = OpenAI(**client_params)
-        messages = [{"role": "user", "content": AI_TEST_PROMPT}]
-        api_mode = CHAT_COMPLETIONS_API_MODE
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    tried_errors: list[str] = []
 
-        try:
-            response = create_ai_response_sync(
-                client,
-                api_mode,
-                build_ai_request_params(
-                    api_mode,
+    async with httpx.AsyncClient(
+        headers=headers,
+        follow_redirects=True,
+        timeout=httpx.Timeout(20.0),
+        proxy=proxy_url or None,
+    ) as client:
+        for url in _build_model_catalog_urls(base_url):
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                models = sorted(_extract_model_ids(response.json()))
+                if models:
+                    return AIModelListResponse(models=models, source_url=url)
+                tried_errors.append(f"{url}: 未返回可识别模型列表")
+            except httpx.HTTPStatusError as exc:
+                tried_errors.append(f"{url}: HTTP {exc.response.status_code}")
+            except Exception as exc:
+                tried_errors.append(f"{url}: {exc}")
+
+    detail = "拉取模型列表失败，请检查 API Base URL、API Key 和代理设置"
+    if tried_errors:
+        detail = f"{detail}。尝试记录：{'；'.join(tried_errors[:3])}"
+    raise HTTPException(status_code=502, detail=detail)
+
+
+@router.post("/ai/models/probe", response_model=AIModelProbeResponse)
+async def probe_ai_models(payload: AIModelProbeRequest):
+    api_key = _resolve_ai_value(payload.OPENAI_API_KEY, "OPENAI_API_KEY")
+    base_url = _resolve_ai_value(payload.OPENAI_BASE_URL, "OPENAI_BASE_URL")
+    proxy_url = _resolve_ai_value(payload.PROXY_URL, "PROXY_URL")
+    models = [str(model).strip() for model in payload.models if str(model).strip()]
+
+    if not base_url:
+        raise HTTPException(status_code=422, detail="请先填写 API Base URL")
+    if not api_key:
+        raise HTTPException(status_code=422, detail="请先填写 API Key，或先保存已有配置")
+    if not models:
+        raise HTTPException(status_code=422, detail="请至少提供一个待验证模型")
+
+    semaphore = asyncio.Semaphore(AI_MODEL_PROBE_CONCURRENCY)
+
+    async def _probe_one(model_name: str) -> AIModelProbeItem:
+        if not payload.force_refresh:
+            cached = _get_cached_probe_result(base_url, model_name)
+            if cached:
+                return AIModelProbeItem(
                     model=model_name,
-                    messages=messages,
-                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
-                ),
-            )
-        except Exception as exc:
-            if not is_chat_completions_api_unsupported_error(exc):
-                raise
-            api_mode = RESPONSES_API_MODE
-            response = create_ai_response_sync(
-                client,
-                api_mode,
-                build_ai_request_params(
-                    api_mode,
-                    model=model_name,
-                    messages=messages,
-                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
-                ),
-            )
+                    available=bool(cached["available"]),
+                    message=str(cached["message"]),
+                    checked_at=str(cached["checked_at"]),
+                    cached=True,
+                )
 
-        return {
-            "success": True,
-            "message": "AI模型连接测试成功！",
-            "response": extract_ai_response_content(response),
+        async with semaphore:
+            result = await asyncio.to_thread(
+                _run_ai_test_request,
+                api_key=api_key,
+                base_url=base_url,
+                proxy_url=proxy_url,
+                model_name=model_name,
+            )
+        item = {
+            "available": bool(result["success"]),
+            "message": str(result["message"]),
+            "checked_at": _utc_timestamp(),
         }
-    except Exception as exc:
-        return {
-            "success": False,
-            "message": f"AI模型连接测试失败: {exc}",
-        }
+        _cache_probe_result(base_url, model_name, item)
+        return AIModelProbeItem(model=model_name, cached=False, **item)
+
+    items = await asyncio.gather(*[_probe_one(model_name) for model_name in models])
+    return AIModelProbeResponse(items=items)

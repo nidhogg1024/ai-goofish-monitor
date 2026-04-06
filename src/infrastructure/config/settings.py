@@ -11,6 +11,7 @@ except ImportError:
 from pydantic import Field
 from typing import Optional
 import os
+from src.services.ai_base_url import normalize_openai_base_url
 
 DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
@@ -48,6 +49,10 @@ class AISettings(_EnvSettings):
     enable_response_format: bool = _env_field(True, "ENABLE_RESPONSE_FORMAT")
     enable_thinking: bool = _env_field(False, "ENABLE_THINKING")
     skip_analysis: bool = _env_field(False, "SKIP_AI_ANALYSIS")
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.base_url = normalize_openai_base_url(self.base_url)
 
     def is_configured(self) -> bool:
         """检查AI是否已正确配置"""

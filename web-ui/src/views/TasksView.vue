@@ -6,6 +6,7 @@ import { useTasks } from '@/composables/useTasks'
 import type { Task, TaskUpdate } from '@/types/task.d.ts'
 import { parseTaskFormDefaults } from '@/lib/taskFormQuery'
 import TaskCreateDialog from '@/components/tasks/TaskCreateDialog.vue'
+import BatchCreateDialog from '@/components/tasks/BatchCreateDialog.vue'
 import TasksTable from '@/components/tasks/TasksTable.vue'
 import TaskForm from '@/components/tasks/TaskForm.vue'
 import { listAccounts, type AccountItem } from '@/api/accounts'
@@ -148,6 +149,23 @@ async function handleRefreshCriteria() {
   }
 }
 
+const isStartingAll = ref(false)
+
+const startableTaskCount = computed(() =>
+  tasks.value.filter((t) => t.enabled && !t.is_running).length,
+)
+
+async function handleStartAll() {
+  const toStart = tasks.value.filter((t) => t.enabled && !t.is_running)
+  if (!toStart.length) return
+  isStartingAll.value = true
+  try {
+    await Promise.allSettled(toStart.map((t) => startTask(t.id)))
+  } finally {
+    isStartingAll.value = false
+  }
+}
+
 async function handleStartTask(taskId: number) {
   try {
     await startTask(taskId)
@@ -208,7 +226,18 @@ onMounted(fetchAccountOptions)
       <h1 class="text-2xl font-bold text-gray-800">
         {{ t('tasks.title') }}
       </h1>
-      <TaskCreateDialog :account-options="accountOptions" @created="fetchTasks" />
+      <div class="flex gap-2">
+        <Button
+          v-if="startableTaskCount > 0"
+          variant="outline"
+          :disabled="isStartingAll"
+          @click="handleStartAll"
+        >
+          {{ isStartingAll ? t('tasks.table.startingAll') : t('tasks.table.startAll', { count: startableTaskCount }) }}
+        </Button>
+        <BatchCreateDialog @created="fetchTasks" />
+        <TaskCreateDialog :account-options="accountOptions" @created="fetchTasks" />
+      </div>
     </div>
 
     <!-- Edit Task Dialog -->

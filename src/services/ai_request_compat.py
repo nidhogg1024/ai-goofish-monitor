@@ -33,6 +33,10 @@ UNSUPPORTED_TEMPERATURE_MARKERS = (
     "temperature",
     "sampling temperature",
 )
+STREAM_REQUIRED_MARKERS = (
+    "stream must be set to true",
+    '"stream": true',
+)
 
 
 def build_responses_input(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -102,6 +106,7 @@ def build_ai_request_params(
     temperature: float | None = None,
     max_output_tokens: int | None = None,
     enable_json_output: bool = False,
+    stream: bool = False,
 ) -> Dict[str, Any]:
     """根据 API 模式构建请求参数。"""
     request_params = {"model": model}
@@ -119,6 +124,8 @@ def build_ai_request_params(
             request_params["max_tokens"] = max_output_tokens
         if temperature is not None:
             request_params["temperature"] = temperature
+        if stream:
+            request_params["stream"] = True
         return add_json_response_format(request_params, enable_json_output)
 
     raise ValueError(f"不支持的 AI API 模式: {api_mode}")
@@ -133,6 +140,9 @@ async def create_ai_response_async(
     if api_mode == RESPONSES_API_MODE:
         return await client.responses.create(**request_params)
     if api_mode == CHAT_COMPLETIONS_API_MODE:
+        if request_params.get("stream"):
+            stream = await client.chat.completions.create(**request_params)
+            return await _collect_stream_text_async(stream)
         return await client.chat.completions.create(**request_params)
     raise ValueError(f"不支持的 AI API 模式: {api_mode}")
 
@@ -146,6 +156,9 @@ def create_ai_response_sync(
     if api_mode == RESPONSES_API_MODE:
         return client.responses.create(**request_params)
     if api_mode == CHAT_COMPLETIONS_API_MODE:
+        if request_params.get("stream"):
+            stream = client.chat.completions.create(**request_params)
+            return _collect_stream_text_sync(stream)
         return client.chat.completions.create(**request_params)
     raise ValueError(f"不支持的 AI API 模式: {api_mode}")
 
@@ -161,11 +174,64 @@ def is_temperature_unsupported_error(error: Exception) -> bool:
     ) and any(marker in message for marker in UNSUPPORTED_TEMPERATURE_MARKERS)
 
 
+def is_stream_required_error(error: Exception) -> bool:
+    """识别 chat.completions 需要显式启用 stream 的网关错误。"""
+    message = str(error).lower()
+    return any(marker in message for marker in STREAM_REQUIRED_MARKERS)
+
+
 def remove_temperature_param(request_params: Dict[str, Any]) -> Dict[str, Any]:
     """移除 temperature 参数，适配不支持采样温度的模型网关。"""
     next_params = dict(request_params)
     next_params.pop("temperature", None)
     return next_params
+
+
+async def _collect_stream_text_async(stream: Any) -> str:
+    parts: list[str] = []
+    if hasattr(stream, "__aiter__"):
+        async for chunk in stream:
+            parts.append(_extract_stream_chunk_text(chunk))
+        return "".join(parts)
+
+    for chunk in stream:
+        parts.append(_extract_stream_chunk_text(chunk))
+    return "".join(parts)
+
+
+def _collect_stream_text_sync(stream: Any) -> str:
+    parts: list[str] = []
+    for chunk in stream:
+        parts.append(_extract_stream_chunk_text(chunk))
+    return "".join(parts)
+
+
+def _extract_stream_chunk_text(chunk: Any) -> str:
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return ""
+
+    delta = getattr(choices[0], "delta", None)
+    if delta is None:
+        return ""
+
+    content = getattr(delta, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                texts.append(item)
+                continue
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                texts.append(item["text"])
+                continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                texts.append(text)
+        return "".join(texts)
+    return ""
 
 
 def _is_api_unsupported_error(

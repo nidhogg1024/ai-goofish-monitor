@@ -11,6 +11,9 @@ from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
 from src.services.task_service import TaskService
 
+DEFAULT_TASK_CRON = "*/15 * * * *"
+
+
 def build_criteria_filename(keyword: str) -> str:
     safe_keyword = "".join(
         char for char in keyword.lower().replace(" ", "_")
@@ -20,17 +23,20 @@ def build_criteria_filename(keyword: str) -> str:
 
 
 def build_task_create(req: TaskGenerateRequest, criteria_file: str) -> TaskCreate:
+    task_name = (req.task_name or req.keyword or "未命名任务").strip()
+    keyword = (req.keyword or req.task_name or "").strip()
+    cron = (req.cron or "").strip() or DEFAULT_TASK_CRON
     return TaskCreate(
-        task_name=req.task_name,
+        task_name=task_name,
         enabled=True,
-        keyword=req.keyword,
+        keyword=keyword,
         description=req.description or "",
         analyze_images=req.analyze_images,
         max_pages=req.max_pages,
         personal_only=req.personal_only,
         min_price=req.min_price,
         max_price=req.max_price,
-        cron=req.cron,
+        cron=cron,
         ai_prompt_base_file="prompts/base_prompt.txt",
         ai_prompt_criteria_file=criteria_file,
         account_state_file=req.account_state_file,

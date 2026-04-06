@@ -9,6 +9,7 @@ from src.services.ai_service import AIAnalysisService
 from src.services.process_service import ProcessService
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
+from src.services.batch_generation_service import BatchGenerationService
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.external.ai_client import AIClient
 
@@ -17,6 +18,7 @@ from src.infrastructure.external.ai_client import AIClient
 _process_service_instance = None
 _scheduler_service_instance = None
 _task_generation_service_instance = None
+_batch_generation_service_instance = None
 
 
 def set_process_service(service: ProcessService):
@@ -35,6 +37,12 @@ def set_task_generation_service(service: TaskGenerationService):
     """设置全局 TaskGenerationService 实例"""
     global _task_generation_service_instance
     _task_generation_service_instance = service
+
+
+def set_batch_generation_service(service: BatchGenerationService):
+    """设置全局 BatchGenerationService 实例"""
+    global _batch_generation_service_instance
+    _batch_generation_service_instance = service
 
 
 # 服务依赖注入
@@ -74,3 +82,10 @@ def get_task_generation_service() -> TaskGenerationService:
     if _task_generation_service_instance is None:
         raise RuntimeError("TaskGenerationService 未初始化")
     return _task_generation_service_instance
+
+
+def get_batch_generation_service() -> BatchGenerationService:
+    """获取批量生成作业服务实例"""
+    if _batch_generation_service_instance is None:
+        raise RuntimeError("BatchGenerationService 未初始化")
+    return _batch_generation_service_instance

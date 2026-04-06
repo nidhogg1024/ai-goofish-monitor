@@ -38,13 +38,23 @@ class _FakeProcessService:
         self.stop_all_called = True
 
 
+class _FakeBrowserLoginService:
+    def __init__(self):
+        self.shutdown_called = False
+
+    async def shutdown(self):
+        self.shutdown_called = True
+
+
 def test_lifespan_cleans_task_logs_on_startup(monkeypatch):
     called = {}
     fake_scheduler = _FakeSchedulerService()
     fake_process = _FakeProcessService()
+    fake_browser_login = _FakeBrowserLoginService()
 
     monkeypatch.setattr(app_module, "scheduler_service", fake_scheduler)
     monkeypatch.setattr(app_module, "process_service", fake_process)
+    monkeypatch.setattr(app_module, "browser_login_service", fake_browser_login)
     monkeypatch.setattr(app_module, "TaskService", _FakeTaskService)
     monkeypatch.setattr(app_module, "SqliteTaskRepository", lambda: object())
     monkeypatch.setattr(app_module, "bootstrap_sqlite_storage", lambda: called.setdefault("bootstrapped", True))
@@ -66,3 +76,4 @@ def test_lifespan_cleans_task_logs_on_startup(monkeypatch):
     assert called["keep_days"] == 9
     assert fake_scheduler.stopped is True
     assert fake_process.stop_all_called is True
+    assert fake_browser_login.shutdown_called is True

@@ -55,10 +55,28 @@ export interface TaskCreateResponse {
 // For PATCH requests, all fields are optional
 export type TaskUpdate = Partial<Omit<Task, 'id' | 'next_run_at'>>;
 
+// Batch generation
+export interface BatchGenerationJob {
+  job_id: string;
+  status: TaskGenerationStatus;
+  message: string;
+  current_step: string | null;
+  steps: TaskGenerationStep[];
+  previews: TaskGenerateRequest[];
+  error: string | null;
+}
+
+export interface BatchCreateResult {
+  success: boolean;
+  task?: Task;
+  task_name?: string;
+  error?: string;
+}
+
 // For task creation
 export interface TaskGenerateRequest {
-  task_name: string;
-  keyword: string;
+  task_name?: string | null;
+  keyword?: string | null;
   description?: string;
   analyze_images?: boolean;
   personal_only?: boolean;

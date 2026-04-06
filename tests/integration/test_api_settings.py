@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import httpx
 
 from src.api import dependencies as deps
 from src.api.routes import settings
@@ -326,7 +327,7 @@ def test_ai_settings_fall_back_to_runtime_environment_when_env_file_missing(tmp_
     env_file = tmp_path / ".env"
     monkeypatch.setattr(env_manager, "env_file", env_file)
     monkeypatch.setenv("OPENAI_API_KEY", "runtime-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://runtime.example.com/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://runtime.example.com/api")
     monkeypatch.setenv("OPENAI_MODEL_NAME", "runtime-model")
     monkeypatch.setenv("PROXY_URL", "http://127.0.0.1:7890")
     client = _build_settings_client()
@@ -334,7 +335,7 @@ def test_ai_settings_fall_back_to_runtime_environment_when_env_file_missing(tmp_
     ai_response = client.get("/api/settings/ai")
     assert ai_response.status_code == 200
     assert ai_response.json() == {
-        "OPENAI_BASE_URL": "https://runtime.example.com/v1",
+        "OPENAI_BASE_URL": "https://runtime.example.com/api/v1",
         "OPENAI_MODEL_NAME": "runtime-model",
         "SKIP_AI_ANALYSIS": False,
         "PROXY_URL": "http://127.0.0.1:7890",
@@ -347,6 +348,26 @@ def test_ai_settings_fall_back_to_runtime_environment_when_env_file_missing(tmp_
     assert env_payload["openai_api_key_set"] is True
     assert env_payload["openai_base_url_set"] is True
     assert env_payload["openai_model_name_set"] is True
+
+
+def test_update_ai_settings_normalizes_base_url(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+
+    response = client.put(
+        "/api/settings/ai",
+        json={
+            "OPENAI_BASE_URL": "https://gateway.example.com/api",
+            "OPENAI_MODEL_NAME": "gpt-5.4",
+        },
+    )
+
+    assert response.status_code == 200
+    latest = env_file.read_text(encoding="utf-8")
+    assert "OPENAI_BASE_URL=https://gateway.example.com/api/v1" in latest
 
 
 def test_notification_settings_fall_back_to_runtime_environment_when_env_file_missing(
@@ -437,3 +458,238 @@ def test_ai_test_endpoint_falls_back_to_responses_when_chat_completions_api_404(
     assert request_history[0][1]["messages"][0]["content"] == settings.AI_TEST_PROMPT
     assert request_history[1][0] == "responses"
     assert request_history[1][1]["input"][0]["content"][0]["text"] == settings.AI_TEST_PROMPT
+
+
+def test_ai_test_endpoint_retries_with_stream_when_gateway_requires_it(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+    request_history = []
+
+    class _FakeChunk:
+        def __init__(self, text: str):
+            self.choices = [
+                type(
+                    "_Choice",
+                    (),
+                    {
+                        "delta": type("_Delta", (), {"content": text})(),
+                        "finish_reason": None,
+                    },
+                )()
+            ]
+
+    class _FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.responses = type(
+                "_Responses",
+                (),
+                {"create": self._responses_create},
+            )()
+            self.chat = type(
+                "_Chat",
+                (),
+                {
+                    "completions": type(
+                        "_Completions",
+                        (),
+                        {"create": self._chat_create},
+                    )()
+                },
+            )()
+
+        def _responses_create(self, **kwargs):
+            raise AssertionError("should not fallback to responses when stream retry works")
+
+        def _chat_create(self, **kwargs):
+            request_history.append(kwargs)
+            if not kwargs.get("stream"):
+                raise Exception("Error code: 400 - {'detail': 'Stream must be set to true'}")
+            return [_FakeChunk("OK")]
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+
+    response = client.post(
+        "/api/settings/ai/test",
+        json={
+            "OPENAI_API_KEY": "demo",
+            "OPENAI_BASE_URL": "https://example.com/api",
+            "OPENAI_MODEL_NAME": "gpt-5.4",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["response"] == "OK"
+    assert request_history[0].get("stream") is not True
+    assert request_history[1]["stream"] is True
+
+
+def test_ai_models_endpoint_uses_stored_settings_and_returns_sorted_models(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=stored-key",
+                "OPENAI_BASE_URL=https://gateway.example.com/api",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+    request_urls = []
+
+    class _FakeResponse:
+        def __init__(self, url: str, payload: dict, status_code: int = 200):
+            self.url = url
+            self._payload = payload
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                request = httpx.Request("GET", self.url)
+                response = httpx.Response(self.status_code, request=request, json=self._payload)
+                raise httpx.HTTPStatusError("request failed", request=request, response=response)
+
+        def json(self):
+            return self._payload
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str):
+            request_urls.append(url)
+            return _FakeResponse(
+                url,
+                {"data": [{"id": "claude-sonnet-4-5-20250929"}, {"id": "claude-3-5-haiku-20241022"}]},
+            )
+
+    monkeypatch.setattr(settings.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = client.post("/api/settings/ai/models", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["models"] == ["claude-3-5-haiku-20241022", "claude-sonnet-4-5-20250929"]
+    assert payload["source_url"] == "https://gateway.example.com/api/v1/models"
+    assert request_urls == ["https://gateway.example.com/api/v1/models"]
+
+
+def test_ai_models_endpoint_falls_back_to_v1_when_primary_catalog_404(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+    request_urls = []
+
+    class _FakeResponse:
+        def __init__(self, url: str, payload: dict, status_code: int = 200):
+            self.url = url
+            self._payload = payload
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                request = httpx.Request("GET", self.url)
+                response = httpx.Response(self.status_code, request=request, json=self._payload)
+                raise httpx.HTTPStatusError("request failed", request=request, response=response)
+
+        def json(self):
+            return self._payload
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str):
+            request_urls.append(url)
+            if url.endswith("/api/models"):
+                return _FakeResponse(url, {"detail": "not found"}, status_code=404)
+            return _FakeResponse(url, {"models": ["claude-sonnet-4-5-20250929"]})
+
+    monkeypatch.setattr(settings.httpx, "AsyncClient", _FakeAsyncClient)
+
+    response = client.post(
+        "/api/settings/ai/models",
+        json={
+            "OPENAI_API_KEY": "submitted-key",
+            "OPENAI_BASE_URL": "https://gateway.example.com/api",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["models"] == ["claude-sonnet-4-5-20250929"]
+    assert payload["source_url"] == "https://gateway.example.com/api/v1/models"
+    assert request_urls == ["https://gateway.example.com/api/v1/models"]
+
+
+def test_ai_model_probe_endpoint_returns_availability_and_cache(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=stored-key",
+                "OPENAI_BASE_URL=https://gateway.example.com/api",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    settings._AI_MODEL_PROBE_CACHE.clear()
+    client = _build_settings_client()
+    calls = []
+
+    def _fake_run_ai_test_request(*, api_key: str, base_url: str, proxy_url: str, model_name: str):
+        calls.append((api_key, base_url, proxy_url, model_name))
+        return {
+            "success": model_name == "gpt-5.4",
+            "message": "AI模型连接测试成功！" if model_name == "gpt-5.4" else "AI模型连接测试失败: Resource not found",
+        }
+
+    monkeypatch.setattr(settings, "_run_ai_test_request", _fake_run_ai_test_request)
+
+    response = client.post(
+        "/api/settings/ai/models/probe",
+        json={"models": ["gpt-5.4", "claude-sonnet-4-5-20250929"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["items"]
+    assert payload[0]["model"] == "gpt-5.4"
+    assert payload[0]["available"] is True
+    assert payload[0]["cached"] is False
+    assert payload[1]["available"] is False
+    assert len(calls) == 2
+    assert calls[0][1] == "https://gateway.example.com/api/v1"
+
+    cached_response = client.post(
+        "/api/settings/ai/models/probe",
+        json={"models": ["gpt-5.4", "claude-sonnet-4-5-20250929"]},
+    )
+    cached_payload = cached_response.json()["items"]
+    assert cached_payload[0]["cached"] is True
+    assert cached_payload[1]["cached"] is True
+    assert len(calls) == 2

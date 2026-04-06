@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useSettings } from '@/composables/useSettings'
@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
 import { getPromptContent, listPrompts, updatePrompt } from '@/api/prompts'
 import NotificationSettingsPanel from '@/components/settings/NotificationSettingsPanel.vue'
@@ -20,19 +20,28 @@ const { t } = useI18n()
 const {
   notificationSettings,
   aiSettings,
+  aiModelOptions,
+  aiModelListSource,
+  aiModelChecks,
   rotationSettings,
   systemStatus,
   isLoading,
   isSaving,
+  isLoadingAiModels,
+  isProbingAiModels,
   isReady,
   error,
   refreshStatus,
+  loadAiModels,
+  probeAiModels,
   saveNotificationSettings,
   testNotification,
   saveAiSettings,
   saveRotationSettings,
   testAiConnection
 } = useSettings()
+
+const CUSTOM_MODEL_VALUE = '__custom__'
 
 const activeTab = ref('ai')
 const route = useRoute()
@@ -100,6 +109,55 @@ async function handleTestAi() {
   } catch (e) {
     notifyError(t('settings.ai.testFailed'), (e as Error).message)
   }
+}
+
+const availableAiModelItems = computed(() => aiModelChecks.value.filter((item) => item.available))
+const unavailableAiModelItems = computed(() => aiModelChecks.value.filter((item) => !item.available))
+const availableAiModels = computed(() => availableAiModelItems.value.map((item) => item.model))
+const unavailableAiModelCount = computed(() => aiModelChecks.value.filter((item) => !item.available).length)
+const displayedAiModels = computed(() => (
+  availableAiModels.value.length > 0 ? availableAiModels.value : aiModelOptions.value
+))
+const currentAiModelProbe = computed(() => {
+  const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
+  if (!currentModel) {
+    return null
+  }
+  return aiModelChecks.value.find((item) => item.model === currentModel) || null
+})
+
+const selectedAiModelValue = computed(() => {
+  const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
+  if (!currentModel) {
+    return undefined
+  }
+  return displayedAiModels.value.includes(currentModel) ? currentModel : CUSTOM_MODEL_VALUE
+})
+
+const showManualModelInput = computed(() => {
+  const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
+  return displayedAiModels.value.length === 0 || !currentModel || !displayedAiModels.value.includes(currentModel)
+})
+
+async function handleRefreshAiModels() {
+  try {
+    const res = await loadAiModels(aiSettings.value)
+    const probe = await probeAiModels(res.models, aiSettings.value, true)
+    const availableCount = probe.items.filter((item) => item.available).length
+    notifySuccess(
+      t('settings.ai.modelsLoaded'),
+      t('settings.ai.probeSummary', { available: availableCount, total: probe.items.length }),
+    )
+  } catch (e) {
+    notifyError(t('settings.ai.loadModelsFailed'), (e as Error).message)
+  }
+}
+
+function handleAiModelSelect(value: string) {
+  if (value === CUSTOM_MODEL_VALUE) {
+    return
+  }
+  aiSettings.value.OPENAI_MODEL_NAME = value
 }
 
 async function fetchPrompts() {
@@ -220,7 +278,102 @@ watch(selectedPrompt, async (value) => {
             </div>
             <div class="grid gap-2">
               <Label>{{ t('settings.ai.modelName') }}</Label>
-              <Input v-model="aiSettings.OPENAI_MODEL_NAME" placeholder="gpt-3.5-turbo" />
+              <div class="flex flex-col gap-2 md:flex-row md:items-center">
+                <div class="flex-1">
+                  <Select
+                    :model-value="selectedAiModelValue"
+                    @update:model-value="(value) => handleAiModelSelect(value as string)"
+                    :disabled="(isLoadingAiModels || isProbingAiModels) || displayedAiModels.length === 0"
+                  >
+                    <SelectTrigger class="w-full">
+                      <SelectValue :placeholder="t('settings.ai.modelSelectPlaceholder')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup v-if="availableAiModelItems.length > 0">
+                        <SelectLabel>{{ t('settings.ai.availableModelsGroup') }}</SelectLabel>
+                        <SelectItem
+                          v-for="item in availableAiModelItems"
+                          :key="item.model"
+                          :value="item.model"
+                        >
+                          {{ item.model }}
+                        </SelectItem>
+                      </SelectGroup>
+                      <template v-else>
+                        <SelectItem
+                          v-for="model in displayedAiModels"
+                          :key="model"
+                          :value="model"
+                        >
+                          {{ model }}
+                        </SelectItem>
+                      </template>
+                      <template v-if="unavailableAiModelItems.length > 0">
+                        <SelectSeparator />
+                        <SelectGroup>
+                          <SelectLabel>{{ t('settings.ai.unavailableModelsGroup') }}</SelectLabel>
+                          <SelectItem
+                            v-for="item in unavailableAiModelItems"
+                            :key="item.model"
+                            :value="`unavailable:${item.model}`"
+                            disabled
+                          >
+                            {{ item.model }}
+                          </SelectItem>
+                        </SelectGroup>
+                      </template>
+                      <SelectSeparator />
+                      <SelectItem value="__custom__">
+                        {{ t('settings.ai.manualEntryOption') }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  variant="outline"
+                  type="button"
+                  @click="handleRefreshAiModels"
+                  :disabled="isLoadingAiModels || isProbingAiModels || isSaving"
+                >
+                  {{ (isLoadingAiModels || isProbingAiModels) ? t('settings.ai.loadingModels') : t('settings.ai.refreshModels') }}
+                </Button>
+              </div>
+              <p class="text-xs text-gray-500">
+                {{
+                  aiModelListSource
+                    ? t('settings.ai.modelSource', { source: aiModelListSource })
+                    : t('settings.ai.modelListHint')
+                }}
+              </p>
+              <p v-if="aiModelChecks.length" class="text-xs text-gray-500">
+                {{
+                  t('settings.ai.probeSummary', {
+                    available: availableAiModels.length,
+                    total: aiModelChecks.length,
+                  })
+                }}
+                <span v-if="unavailableAiModelCount > 0">
+                  · {{ t('settings.ai.unavailableSummary', { count: unavailableAiModelCount }) }}
+                </span>
+              </p>
+              <div v-if="showManualModelInput" class="grid gap-2">
+                <Label>{{ t('settings.ai.manualModelName') }}</Label>
+                <Input
+                  v-model="aiSettings.OPENAI_MODEL_NAME"
+                  :placeholder="t('settings.ai.manualModelPlaceholder')"
+                />
+                <p
+                  v-if="currentAiModelProbe && !currentAiModelProbe.available"
+                  class="text-xs text-amber-600"
+                >
+                  {{
+                    t('settings.ai.currentModelUnavailable', {
+                      model: currentAiModelProbe.model,
+                      reason: currentAiModelProbe.message,
+                    })
+                  }}
+                </p>
+              </div>
             </div>
             <div class="grid gap-2">
               <Label>{{ t('settings.ai.proxy') }}</Label>

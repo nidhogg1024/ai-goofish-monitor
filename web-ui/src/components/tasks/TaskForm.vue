@@ -15,6 +15,7 @@ type FormMode = 'create' | 'edit'
 type EmittedData = TaskGenerateRequest | Partial<Task>
 const AUTO_ACCOUNT_VALUE = '__auto__'
 const EMPTY_CRON_VALUE = '__manual__'
+const DEFAULT_CRON_VALUE = '*/15 * * * *'
 
 const props = defineProps<{
   mode: FormMode
@@ -34,6 +35,10 @@ const accountStrategy = ref<'auto' | 'fixed' | 'rotate'>('auto')
 const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
 const cronMode = ref<'preset' | 'custom'>('preset')
+const isCreateMode = computed(() => props.mode === 'create')
+const allowAiAutofill = computed(
+  () => isCreateMode.value && (form.value.decision_mode || 'ai') === 'ai'
+)
 
 // 常用 cron 预设选项
 const cronPresets = computed(() => [
@@ -128,7 +133,7 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       personal_only: true,
       min_price: undefined,
       max_price: undefined,
-      cron: '',
+      cron: DEFAULT_CRON_VALUE,
       account_strategy: props.defaultAccount ? 'fixed' : 'auto',
       account_state_file: props.defaultAccount || AUTO_ACCOUNT_VALUE,
       free_shipping: true,
@@ -151,7 +156,7 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       keywordRulesInput.value = defaultValues.keyword_rules.join('\n')
     }
     // 创建模式下，根据默认值判断模式
-    const cronVal = defaultValues.cron ?? ''
+    const cronVal = defaultValues.cron ?? DEFAULT_CRON_VALUE
     cronMode.value = isPresetCronValue(cronVal) ? 'preset' : 'custom'
   }
 
@@ -184,7 +189,12 @@ function handleAccountStateFileChange(event: Event) {
 }
 
 function handleSubmit() {
-  if (!form.value.task_name || !form.value.keyword) {
+  const decisionMode = form.value.decision_mode || 'ai'
+  const taskName = String(form.value.task_name || '').trim()
+  const keyword = String(form.value.keyword || '').trim()
+  const description = String(form.value.description || '').trim()
+
+  if (props.mode === 'edit' && (!taskName || !keyword)) {
     toast({
       title: t('tasks.form.validation.incomplete'),
       description: t('tasks.form.validation.nameAndKeywordRequired'),
@@ -193,7 +203,6 @@ function handleSubmit() {
     return
   }
 
-  const decisionMode = form.value.decision_mode || 'ai'
   if (decisionMode === 'ai' && !String(form.value.description || '').trim()) {
     toast({
       title: t('tasks.form.validation.incomplete'),
@@ -204,13 +213,23 @@ function handleSubmit() {
   }
 
   const keywordRules = parseKeywordText(keywordRulesInput.value)
-  if (decisionMode === 'keyword' && keywordRules.length === 0) {
-    toast({
-      title: t('tasks.form.validation.keywordRuleIncomplete'),
-      description: t('tasks.form.validation.keywordRuleRequired'),
-      variant: 'destructive',
-    })
-    return
+  if (decisionMode === 'keyword') {
+    if (!keyword) {
+      toast({
+        title: t('tasks.form.validation.incomplete'),
+        description: t('tasks.form.validation.keywordRequired'),
+        variant: 'destructive',
+      })
+      return
+    }
+    if (keywordRules.length === 0) {
+      toast({
+        title: t('tasks.form.validation.keywordRuleIncomplete'),
+        description: t('tasks.form.validation.keywordRuleRequired'),
+        variant: 'destructive',
+      })
+      return
+    }
   }
 
   // Filter out fields that shouldn't be sent in update requests
@@ -249,8 +268,16 @@ function handleSubmit() {
   submitData.account_strategy = currentAccountStrategy
   submitData.analyze_images = submitData.analyze_images !== false
   submitData.keyword_rules = decisionMode === 'keyword' ? keywordRules : []
+  submitData.task_name = taskName || null
+  submitData.keyword = keyword || null
   if (decisionMode === 'keyword' && !submitData.description) {
     submitData.description = ''
+  }
+  if (decisionMode === 'keyword' && !submitData.task_name && submitData.keyword) {
+    submitData.task_name = submitData.keyword
+  }
+  if (decisionMode === 'ai' && !submitData.description && description) {
+    submitData.description = description
   }
 
   emit('submit', submitData)
@@ -260,13 +287,38 @@ function handleSubmit() {
 <template>
   <form id="task-form" @submit.prevent="handleSubmit">
     <div class="grid gap-6 py-4">
+      <div
+        v-if="allowAiAutofill"
+        class="rounded-lg border border-blue-200 bg-blue-50/80 px-4 py-3 text-sm text-blue-900"
+      >
+        <p class="font-medium">{{ t('tasks.form.quickCreateTitle') }}</p>
+        <p class="mt-1 text-blue-800/90">{{ t('tasks.form.quickCreateHint') }}</p>
+      </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="task-name" class="sm:text-right">{{ t('tasks.form.taskName') }}</Label>
-        <Input id="task-name" v-model="form.task_name" class="sm:col-span-3" :placeholder="t('tasks.form.taskNamePlaceholder')" required />
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="task-name"
+            v-model="form.task_name"
+            :placeholder="allowAiAutofill ? t('tasks.form.taskNameAutoPlaceholder') : t('tasks.form.taskNamePlaceholder')"
+          />
+          <p v-if="allowAiAutofill" class="text-xs text-gray-500">
+            {{ t('tasks.form.taskNameAutoHint') }}
+          </p>
+        </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="keyword" class="sm:text-right">{{ t('tasks.form.keyword') }}</Label>
-        <Input id="keyword" v-model="form.keyword" class="sm:col-span-3" :placeholder="t('tasks.form.keywordPlaceholder')" required />
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="keyword"
+            v-model="form.keyword"
+            :placeholder="allowAiAutofill ? t('tasks.form.keywordAutoPlaceholder') : t('tasks.form.keywordPlaceholder')"
+          />
+          <p v-if="allowAiAutofill" class="text-xs text-gray-500">
+            {{ t('tasks.form.keywordAutoHint') }}
+          </p>
+        </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.decisionMode') }}</Label>

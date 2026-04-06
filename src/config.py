@@ -3,6 +3,7 @@ import sys
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from src.services.ai_base_url import normalize_openai_base_url
 
 # --- AI & Notification Configuration ---
 load_dotenv()
@@ -22,7 +23,7 @@ DETAIL_API_URL_PATTERN = "h5api.m.goofish.com/h5/mtop.taobao.idle.pc.detail"
 
 # --- Environment Variables ---
 API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("OPENAI_BASE_URL")
+BASE_URL = normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME")
 PROXY_URL = os.getenv("PROXY_URL")
 NTFY_TOPIC_URL = os.getenv("NTFY_TOPIC_URL")

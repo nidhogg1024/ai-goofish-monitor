@@ -17,17 +17,21 @@ from src.api.routes import (
     login_state,
     websocket,
     accounts,
+    batch_tasks,
 )
 from src.api.dependencies import (
     set_process_service,
     set_scheduler_service,
     set_task_generation_service,
+    set_batch_generation_service,
 )
 from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
 from src.services.scheduler_service import SchedulerService
 from src.services.task_log_cleanup_service import cleanup_task_logs
 from src.services.task_generation_service import TaskGenerationService
+from src.services.batch_generation_service import BatchGenerationService
+from src.services.browser_login_service import browser_login_service
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.config.settings import settings as app_settings
@@ -37,6 +41,7 @@ from src.infrastructure.config.settings import settings as app_settings
 process_service = ProcessService()
 scheduler_service = SchedulerService(process_service)
 task_generation_service = TaskGenerationService()
+batch_generation_service = BatchGenerationService()
 
 
 async def _sync_task_runtime_status(task_id: int, is_running: bool) -> None:
@@ -60,6 +65,7 @@ process_service.set_lifecycle_hooks(
 set_process_service(process_service)
 set_scheduler_service(scheduler_service)
 set_task_generation_service(task_generation_service)
+set_batch_generation_service(batch_generation_service)
 
 
 @asynccontextmanager
@@ -91,6 +97,7 @@ async def lifespan(app: FastAPI):
     print("正在关闭应用...")
     scheduler_service.stop()
     await process_service.stop_all()
+    await browser_login_service.shutdown()
     print("应用已关闭")
 
 
@@ -112,6 +119,7 @@ app.include_router(results.router)
 app.include_router(login_state.router)
 app.include_router(websocket.router)
 app.include_router(accounts.router)
+app.include_router(batch_tasks.router)
 
 # 挂载静态文件
 # 旧的静态文件目录（用于截图等）

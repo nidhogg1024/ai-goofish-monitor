@@ -43,6 +43,7 @@ from src.services.ai_request_compat import (
     is_chat_completions_api_unsupported_error,
     is_json_output_unsupported_error,
     is_responses_api_unsupported_error,
+    is_stream_required_error,
     is_temperature_unsupported_error,
     remove_temperature_param,
 )
@@ -373,6 +374,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
     api_mode = CHAT_COMPLETIONS_API_MODE
     use_response_format = ENABLE_RESPONSE_FORMAT
     use_temperature = True
+    use_stream = False
     for attempt in range(max_retries):
         try:
             # 根据重试次数调整参数
@@ -387,6 +389,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 temperature=current_temperature,
                 max_output_tokens=4000,
                 enable_json_output=use_response_format,
+                stream=use_stream,
             )
             if not use_temperature:
                 request_params = remove_temperature_param(request_params)
@@ -455,6 +458,11 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 api_mode = CHAT_COMPLETIONS_API_MODE
                 safe_print(
                     "   [AI分析] 当前服务未实现 Responses API，后续重试将自动回退到 Chat Completions API。"
+                )
+            if api_mode == CHAT_COMPLETIONS_API_MODE and not use_stream and is_stream_required_error(e):
+                use_stream = True
+                safe_print(
+                    "   [AI分析] 当前网关要求 stream=true，后续重试将自动启用流式 Chat Completions。"
                 )
             if use_response_format and is_json_output_unsupported_error(e):
                 use_response_format = False

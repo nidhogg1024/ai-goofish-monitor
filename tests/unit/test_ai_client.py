@@ -176,6 +176,37 @@ def test_call_ai_retries_without_temperature_when_gateway_rejects_it():
     assert "temperature" not in request_history[1]
 
 
+def test_call_ai_retries_with_stream_when_gateway_requires_it():
+    client = AIClient.__new__(AIClient)
+    client.settings = SimpleNamespace(
+        model_name="gpt-5.4",
+        enable_response_format=False,
+        enable_thinking=False,
+    )
+    request_history = []
+
+    async def fake_chat_create(**kwargs):
+        request_history.append(kwargs)
+        if not kwargs.get("stream"):
+            raise Exception("Error code: 400 - {'detail': 'Stream must be set to true'}")
+        return [
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="OK"))]
+            )
+        ]
+
+    async def fake_responses_create(**_kwargs):
+        raise AssertionError("stream 重试不应切到 responses API")
+
+    client.client = _build_fake_client(fake_responses_create, fake_chat_create)
+
+    response = asyncio.run(client._call_ai([{"role": "user", "content": "hi"}]))
+
+    assert response == "OK"
+    assert request_history[0].get("stream") is not True
+    assert request_history[1]["stream"] is True
+
+
 def test_call_ai_retries_when_response_content_is_empty():
     client = AIClient.__new__(AIClient)
     client.settings = SimpleNamespace(

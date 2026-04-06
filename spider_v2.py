@@ -116,12 +116,26 @@ async def main():
             try:
                 with open(task["ai_prompt_base_file"], 'r', encoding='utf-8') as f_base:
                     base_prompt = f_base.read()
-                with open(task["ai_prompt_criteria_file"], 'r', encoding='utf-8') as f_criteria:
-                    criteria_text = f_criteria.read()
-                
+
+                criteria_file = task["ai_prompt_criteria_file"]
+                if not os.path.exists(criteria_file) and task.get("description"):
+                    # criteria 文件不存在但有 description，运行时自动生成
+                    print(f"📝 任务 '{task['task_name']}' 的 criteria 文件不存在，正在从 description 自动生成…")
+                    from src.prompt_utils import generate_criteria
+                    from src.services.task_generation_runner import save_generated_criteria
+                    criteria_text = await generate_criteria(
+                        user_description=task["description"],
+                        reference_file_path="prompts/macbook_criteria.txt",
+                    )
+                    await save_generated_criteria(criteria_file, criteria_text)
+                    print(f"✅ 任务 '{task['task_name']}' 的 criteria 已自动生成并保存。")
+                else:
+                    with open(criteria_file, 'r', encoding='utf-8') as f_criteria:
+                        criteria_text = f_criteria.read()
+
                 # 动态组合成最终的Prompt
                 task['ai_prompt_text'] = base_prompt.replace("{{CRITERIA_SECTION}}", criteria_text)
-                
+
                 # 验证生成的prompt是否有效
                 if len(task['ai_prompt_text']) < 100:
                     print(f"警告: 任务 '{task['task_name']}' 生成的prompt过短 ({len(task['ai_prompt_text'])} 字符)，可能存在问题。")

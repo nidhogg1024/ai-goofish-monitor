@@ -20,6 +20,7 @@ from src.services.task_generation_runner import (
     build_task_create,
     run_ai_generation_job,
 )
+from src.services.task_intent_service import enrich_generate_request
 from src.services.task_payloads import serialize_task, serialize_tasks
 from src.domain.models.task import TaskCreate, TaskUpdate, TaskGenerateRequest
 from src.prompt_utils import generate_criteria
@@ -92,6 +93,7 @@ async def generate_task(
     generation_service: TaskGenerationService = Depends(get_task_generation_service),
 ):
     """创建任务。AI模式会生成分析标准，关键词模式直接保存规则。"""
+    req = await enrich_generate_request(req)
     print(f"收到任务生成请求: {req.task_name}，模式: {req.decision_mode}")
 
     try:
