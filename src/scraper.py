@@ -13,6 +13,10 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
+try:
+    from playwright_stealth import stealth_async
+except ImportError:
+    stealth_async = None
 
 from src.ai_handler import (
     download_all_images,
@@ -773,6 +777,8 @@ async def _interactive_recover_session(
                 pass
 
             page = await context.new_page()
+            if stealth_async:
+                await stealth_async(page)
             destination = target_url or "https://www.goofish.com/"
             await page.goto(destination, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(1200)
@@ -1114,6 +1120,23 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
             page = await context.new_page()
 
+            if stealth_async:
+                await stealth_async(page)
+
+            async def _intercept_headers(route):
+                headers = {**route.request.headers}
+                headers.pop("x-playwright", None)
+                headers.pop("x-devtools", None)
+                if route.request.resource_type == "document":
+                    headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                    headers.setdefault("Upgrade-Insecure-Requests", "1")
+                    headers.setdefault("sec-ch-ua", '"Chromium";v="131", "Google Chrome";v="131", "Not-A.Brand";v="99"')
+                    headers.setdefault("sec-ch-ua-mobile", "?0")
+                    headers.setdefault("sec-ch-ua-platform", '"macOS"')
+                await route.continue_(headers=headers)
+
+            await page.route("**/*", _intercept_headers)
+
             try:
                 # 步骤 0 - 模拟真实用户：先访问首页（重要的反检测措施）
                 log_time("步骤 0 - 模拟真实用户访问首页...")
@@ -1274,6 +1297,29 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     # 2秒内弹窗未出现，这是正常情况，继续执行
                     pass
                 # --- 结束新增 ---
+
+                # --- 空白页检测：搜索结果为空可能是被静默风控 ---
+                _blank_check_selectors = [
+                    "div[class*='item-card']",
+                    "div[class*='search-content'] a",
+                    "div[class*='feeds-list'] div",
+                ]
+                has_results = False
+                for sel in _blank_check_selectors:
+                    try:
+                        count = await page.locator(sel).count()
+                        if count > 0:
+                            has_results = True
+                            break
+                    except Exception:
+                        pass
+                if not has_results:
+                    body_text = await page.evaluate("document.body?.innerText?.length || 0")
+                    if body_text < 200:
+                        logger.warning(
+                            "搜索结果页疑似空白（无商品卡片，正文 %d 字符），可能被静默风控。", body_text
+                        )
+                        raise RiskControlError("搜索结果页空白，疑似被静默拦截")
 
                 try:
                     await page.click("div[class*='closeIconBg']", timeout=3000)
