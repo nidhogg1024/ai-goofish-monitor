@@ -840,6 +840,40 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         picked = account_pool.pick_random()
         return picked or selected_account
 
+    def _try_emergency_account_switch(reason: str) -> bool:
+        """风控/登录失效时的紧急账号切换。
+        不受 account_enabled 限制 — 只要 state 目录下还有其他可用账号就切换。
+        """
+        nonlocal selected_account, account_pool
+        if selected_account:
+            account_pool.mark_bad(selected_account, reason)
+
+        if not rotation_settings["account_enabled"]:
+            all_files = load_state_files(rotation_settings["account_state_dir"])
+            current_path = selected_account.value if selected_account else ""
+            others = [f for f in all_files if f != current_path]
+            if others:
+                logger.info(
+                    "原策略未开启轮换，但检测到 %d 个备用账号，临时启用紧急切换。",
+                    len(others),
+                )
+                account_pool = RotationPool(
+                    others,
+                    rotation_settings["account_blacklist_ttl"],
+                    "account-emergency",
+                )
+                rotation_settings["account_enabled"] = True
+            else:
+                logger.warning("state 目录下无其他可用账号，无法切换。")
+                return False
+
+        picked = account_pool.pick_random()
+        if picked and (not selected_account or picked.value != selected_account.value):
+            selected_account = picked
+            return True
+        logger.warning("账号池中无更多可用账号（均已被标记为异常）。")
+        return False
+
     def _select_proxy(force_new: bool = False) -> Optional[RotationItem]:
         nonlocal selected_proxy
         if not rotation_settings["proxy_enabled"]:
@@ -1746,14 +1780,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         except LoginRequiredError as e:
             last_error = str(e)
             logger.warning("检测到登录失效/重定向: %s", e)
-            if rotation_settings["account_enabled"]:
-                account_pool.mark_bad(selected_account, last_error)
-                next_account = _select_account(force_new=True)
-                if next_account:
-                    selected_account = next_account
-                    logger.info("登录失效，已切换到账号: %s", selected_account.value)
-                    continue
-                logger.warning("无可用账号可切换，停止重试。")
+            switched = _try_emergency_account_switch(last_error)
+            if switched:
+                logger.info("登录失效，已切换到账号: %s", selected_account.value)
+                continue
             break
         except RiskControlError as e:
             last_error = str(e)
@@ -1763,15 +1793,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 keyword=task_config.get("keyword", ""),
                 reason=last_error,
             )
-            if rotation_settings["account_enabled"]:
-                account_pool.mark_bad(selected_account, last_error)
-                next_account = _select_account(force_new=True)
-                if next_account:
-                    selected_account = next_account
-                    logger.info("风控触发，已切换到账号: %s", selected_account.value)
-                    await asyncio.sleep(random.uniform(5, 15))
-                    continue
-                logger.warning("无可用账号可切换，停止重试。")
+            switched = _try_emergency_account_switch(last_error)
+            if switched:
+                logger.info("风控触发，已切换到账号: %s", selected_account.value)
+                await asyncio.sleep(random.uniform(5, 15))
+                continue
             break
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
