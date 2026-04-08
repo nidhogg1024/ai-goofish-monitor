@@ -101,29 +101,178 @@ _DEFAULT_USER_AGENT = (
 )
 
 _ANTI_DETECTION_SCRIPT_BASE = """\
+/* ---- 1. navigator.webdriver ---- */
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+delete navigator.__proto__.webdriver;
+
+/* ---- 2. plugins & mimeTypes ---- */
 Object.defineProperty(navigator, 'plugins', {
-    get: () => [
-        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
-        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
-        {name: 'Native Client', filename: 'internal-nacl-plugin'},
-    ]
+    get: () => {
+        const arr = [
+            {name:'Chrome PDF Plugin',filename:'internal-pdf-viewer',description:'Portable Document Format',length:1},
+            {name:'Chrome PDF Viewer',filename:'mhjfbmdgcfjbbpaeojofohoefgiehjai',description:'',length:1},
+            {name:'Native Client',filename:'internal-nacl-plugin',description:'',length:2},
+        ];
+        arr.refresh = () => {};
+        return arr;
+    }
 });
-Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
-window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
+Object.defineProperty(navigator, 'mimeTypes', {
+    get: () => {
+        const arr = [{type:'application/pdf',suffixes:'pdf',description:'Portable Document Format'}];
+        arr.refresh = () => {};
+        return arr;
+    }
+});
+
+/* ---- 3. languages ---- */
+Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en-US','en']});
+
+/* ---- 4. platform & hardwareConcurrency & deviceMemory ---- */
+Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+if (!navigator.deviceMemory) Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+
+/* ---- 5. window.chrome ---- */
+window.chrome = {
+    app: {isInstalled: false, InstallState: {DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'}, RunningState: {CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'}},
+    runtime: {OnInstalledReason: {CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'}, OnRestartRequiredReason: {APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'}, PlatformArch: {ARM:'arm',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'}, PlatformNaclArch: {ARM:'arm',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'}, PlatformOs: {ANDROID:'android',CROS:'cros',LINUX:'linux',MAC:'mac',OPENBSD:'openbsd',WIN:'win'}, RequestUpdateCheckStatus: {NO_UPDATE:'no_update',THROTTLED:'throttled',UPDATE_AVAILABLE:'update_available'}, connect: function(){}, sendMessage: function(){}},
+    loadTimes: function() { return {commitLoadTime: Date.now()/1000, connectionInfo:'http/1.1', finishDocumentLoadTime: Date.now()/1000+0.3, finishLoadTime: Date.now()/1000+0.5, firstPaintAfterLoadTime: 0, firstPaintTime: Date.now()/1000+0.1, navigationType:'Other', npnNegotiatedProtocol:'unknown', requestTime: Date.now()/1000-0.5, startLoadTime: Date.now()/1000-0.5, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: false, wasNpnNegotiated: false}; },
+    csi: function() { return {onloadT: Date.now(), startE: Date.now()-500, pageT: 500}; },
+};
+
+/* ---- 6. CDP (Chrome DevTools Protocol) 检测防护 ---- */
+const _Error = Error;
+const _origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const _origToString = Function.prototype.toString;
+const _nativeToString = _origToString.call(_origToString);
+Function.prototype.toString = function() {
+    if (this === Function.prototype.toString) return _nativeToString;
+    if (typeof this === 'function' && _origToString.call(this).includes('[native code]'))
+        return `function ${this.name || ''}() { [native code] }`;
+    return _origToString.call(this);
+};
+
+/* ---- 7. iframe contentWindow 一致性 ---- */
+try {
+    const _origHTMLIFrameElementProto = HTMLIFrameElement.prototype;
+    const _origContentWindow = Object.getOwnPropertyDescriptor(_origHTMLIFrameElementProto, 'contentWindow');
+    if (_origContentWindow) {
+        Object.defineProperty(_origHTMLIFrameElementProto, 'contentWindow', {
+            get: function() {
+                const w = _origContentWindow.get.call(this);
+                if (w) { try { w.chrome = window.chrome; } catch(e) {} }
+                return w;
+            }
+        });
+    }
+} catch(e) {}
+
+/* ---- 8. WebGL vendor/renderer (防止暴露 SwiftShader) ---- */
+try {
+    const _getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(param) {
+        if (param === 37445) return 'Google Inc. (Apple)';
+        if (param === 37446) return 'ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)';
+        return _getParameter.call(this, param);
+    };
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+        const _getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 37445) return 'Google Inc. (Apple)';
+            if (param === 37446) return 'ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)';
+            return _getParameter2.call(this, param);
+        };
+    }
+} catch(e) {}
 """
 
 _ANTI_DETECTION_SCRIPT_FULL = _ANTI_DETECTION_SCRIPT_BASE + """\
-const originalQuery = window.navigator.permissions.query;
+/* ---- 9. Permissions API ---- */
+const _origPermQuery = window.navigator.permissions.query;
 window.navigator.permissions.query = (parameters) => (
     parameters.name === 'notifications' ?
         Promise.resolve({state: Notification.permission}) :
-        originalQuery(parameters)
+        _origPermQuery(parameters)
 );
+
+/* ---- 10. canvas 指纹微扰 ---- */
+try {
+    const _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(type) {
+        const ctx = this.getContext('2d');
+        if (ctx) {
+            const style = ctx.fillStyle;
+            ctx.fillStyle = 'rgba(0,0,1,0.003)';
+            ctx.fillRect(0, 0, 1, 1);
+            ctx.fillStyle = style;
+        }
+        return _origToDataURL.apply(this, arguments);
+    };
+    const _origToBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function() {
+        const ctx = this.getContext('2d');
+        if (ctx) {
+            const style = ctx.fillStyle;
+            ctx.fillStyle = 'rgba(0,0,1,0.003)';
+            ctx.fillRect(0, 0, 1, 1);
+            ctx.fillStyle = style;
+        }
+        return _origToBlob.apply(this, arguments);
+    };
+} catch(e) {}
+
+/* ---- 11. AudioContext 指纹微扰 ---- */
+try {
+    const _origGetFloatFreqData = AnalyserNode.prototype.getFloatFrequencyData;
+    AnalyserNode.prototype.getFloatFrequencyData = function(array) {
+        _origGetFloatFreqData.call(this, array);
+        for (let i = 0; i < array.length; i += 100) {
+            array[i] = array[i] + Math.random() * 0.0001;
+        }
+    };
+} catch(e) {}
 """
 
 PRICE_FILTER_LOW_RATIO = 0.7
 PRICE_FILTER_HIGH_RATIO = 1.3
+
+
+async def _human_like_mouse_move(page, *, steps: int = 0) -> None:
+    """模拟人类鼠标移动：随机贝塞尔曲线轨迹。"""
+    try:
+        vw = page.viewport_size
+        if not vw:
+            return
+        w, h = vw["width"], vw["height"]
+        n = steps or random.randint(2, 4)
+        x, y = random.randint(100, w - 100), random.randint(100, h - 200)
+        for _ in range(n):
+            dx = random.randint(-180, 180)
+            dy = random.randint(-120, 120)
+            x = max(20, min(w - 20, x + dx))
+            y = max(20, min(h - 20, y + dy))
+            await page.mouse.move(x, y, steps=random.randint(5, 15))
+            await asyncio.sleep(random.uniform(0.05, 0.25))
+    except Exception:
+        pass
+
+
+async def _human_like_scroll(page) -> None:
+    """模拟人类滚动：变速、偶尔回滚。"""
+    try:
+        total = random.randint(300, 800)
+        scrolled = 0
+        while scrolled < total:
+            chunk = random.randint(60, 200)
+            await page.mouse.wheel(0, chunk)
+            scrolled += chunk
+            await asyncio.sleep(random.uniform(0.1, 0.4))
+        if random.random() < 0.3:
+            await page.mouse.wheel(0, -random.randint(50, 150))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+    except Exception:
+        pass
 
 
 def _has_valid_auth_cookie_values(cookies) -> bool:
@@ -974,18 +1123,18 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     timeout=30000,
                 )
                 log_time("[反爬] 在首页停留，模拟浏览...")
-                await random_sleep(1, 2)
+                await random_sleep(1.5, 3)
+                await _human_like_mouse_move(page)
 
-                # 模拟随机滚动（移动设备的触摸滚动）
                 try:
-                    await page.evaluate("window.scrollBy(0, Math.random() * 500 + 200)")
+                    await _human_like_scroll(page)
                 except Exception as e:
                     if "Execution context was destroyed" in str(e):
                         log_time("首页仍在跳转，跳过一次滚动模拟。")
                         await page.wait_for_load_state("domcontentloaded", timeout=5000)
                     else:
                         raise
-                await random_sleep(1, 2)
+                await random_sleep(1, 2.5)
 
                 log_time("步骤 1 - 导航到搜索结果页...")
                 actual_search_term = task_config.get("search_query") or keyword
@@ -1053,8 +1202,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     else:
                         raise
 
-                # 模拟真实用户行为：页面加载后的初始停留和浏览
-                log_time("[反爬] 模拟用户查看页面...")
+                log_time("[反爬] 模拟用户查看搜索结果页...")
+                await _human_like_mouse_move(page, steps=3)
+                await _human_like_scroll(page)
                 await random_sleep(1, 3)
 
                 # --- 新增：检查是否存在验证弹窗 ---
@@ -1292,6 +1442,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     log_time(f"开始处理第 {page_num}/{effective_max_pages} 页 ...")
 
                     if page_num > 1:
+                        await _human_like_scroll(page)
+                        await _human_like_mouse_move(page, steps=2)
                         page_advance_result = await advance_search_page(
                             page=page,
                             page_num=page_num,
