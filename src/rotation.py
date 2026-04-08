@@ -2,7 +2,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 
 @dataclass
@@ -20,9 +20,7 @@ class RotationPool:
 
     def _cleanup_blacklist(self) -> None:
         now = time.time()
-        expired = [key for key, ts in self._blacklist.items() if ts <= now]
-        for key in expired:
-            self._blacklist.pop(key, None)
+        self._blacklist = {key: ts for key, ts in self._blacklist.items() if ts > now}
 
     def available_items(self) -> List[RotationItem]:
         self._cleanup_blacklist()
@@ -43,7 +41,7 @@ class RotationPool:
         self._blacklist[item.value] = time.time() + self.blacklist_ttl
 
 
-def parse_proxy_pool(value: Optional[str]) -> List[str]:
+def parse_proxy_pool(value: Union[str, List[str], None]) -> List[str]:
     if not value:
         return []
     if isinstance(value, list):

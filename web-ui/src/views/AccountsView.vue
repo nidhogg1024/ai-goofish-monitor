@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onScopeDispose, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
@@ -160,9 +160,22 @@ async function pollBrowserLogin(jobId: string) {
   }
 }
 
+function isValidJson(str: string): boolean {
+  try {
+    JSON.parse(str)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function handleCreateAccount() {
   if (!newName.value.trim() || !newContent.value.trim()) {
     toast({ title: t('accounts.toasts.incomplete'), description: t('accounts.toasts.createDescriptionRequired'), variant: 'destructive' })
+    return
+  }
+  if (!isValidJson(newContent.value.trim())) {
+    toast({ title: t('accounts.toasts.invalidJson'), description: t('accounts.toasts.invalidJsonDescription'), variant: 'destructive' })
     return
   }
   isSaving.value = true
@@ -207,6 +220,10 @@ async function handleUpdateAccount() {
     toast({ title: t('accounts.toasts.contentRequired'), description: t('accounts.toasts.updateDescriptionRequired'), variant: 'destructive' })
     return
   }
+  if (!isValidJson(editContent.value.trim())) {
+    toast({ title: t('accounts.toasts.invalidJson'), description: t('accounts.toasts.invalidJsonDescription'), variant: 'destructive' })
+    return
+  }
   isSaving.value = true
   try {
     await updateAccount(editName.value, editContent.value.trim())
@@ -235,7 +252,7 @@ async function handleDeleteAccount() {
 }
 
 onMounted(fetchAccounts)
-onUnmounted(stopBrowserLoginPolling)
+onScopeDispose(stopBrowserLoginPolling)
 </script>
 
 <template>

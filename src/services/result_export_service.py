@@ -28,6 +28,7 @@ EXPORT_HEADERS = [
 
 def build_results_csv(records: list[dict]) -> str:
     buffer = StringIO()
+    buffer.write("\ufeff")
     writer = csv.DictWriter(buffer, fieldnames=EXPORT_HEADERS)
     writer.writeheader()
 
@@ -52,8 +53,8 @@ def build_results_csv(records: list[dict]) -> str:
                 "价格最低值": price_insight.get("min_price", ""),
                 "价格最高值": price_insight.get("max_price", ""),
                 "市场均价": price_insight.get("market_avg_price", ""),
-                "性价比分数": ai_analysis.get("value_score", price_insight.get("deal_score", "")),
-                "性价比标签": ai_analysis.get("value_summary", price_insight.get("deal_label", "")),
+                "性价比分数": ai_analysis.get("value_score") or price_insight.get("deal_score", ""),
+                "性价比标签": ai_analysis.get("value_summary") or price_insight.get("deal_label", ""),
                 "商品链接": item.get("商品链接", ""),
             }
         )

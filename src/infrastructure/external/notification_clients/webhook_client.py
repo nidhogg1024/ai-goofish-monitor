@@ -1,12 +1,12 @@
 """
 通用 Webhook 通知客户端
 """
-import asyncio
 import json
+import re
 from typing import Any, Dict
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-import requests
+import httpx
 
 from .base import NotificationClient, NotificationMessage
 
@@ -40,30 +40,23 @@ class WebhookClient(NotificationClient):
             raise RuntimeError("Webhook 未启用")
 
         message = self._build_message(product_data, reason)
-        headers = self._parse_json(self.webhook_headers, "WEBHOOK_HEADERS", expect_dict=True) or {}
+        headers = dict(self._parse_json(self.webhook_headers, "WEBHOOK_HEADERS", expect_dict=True) or {})
         final_url = self._build_url(message)
-        loop = asyncio.get_running_loop()
 
-        if self.webhook_method == "GET":
-            response = await loop.run_in_executor(
-                None,
-                lambda: requests.get(final_url, headers=headers, timeout=15),
-            )
-            response.raise_for_status()
-            return
+        async with httpx.AsyncClient(timeout=15) as client:
+            if self.webhook_method == "GET":
+                response = await client.get(final_url, headers=headers)
+                response.raise_for_status()
+                return
 
-        json_payload, form_payload = self._build_body(message, headers)
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(
+            json_payload, form_payload = self._build_body(message, headers)
+            response = await client.post(
                 final_url,
                 headers=headers,
                 json=json_payload,
                 data=form_payload,
-                timeout=15,
-            ),
-        )
-        response.raise_for_status()
+            )
+            response.raise_for_status()
 
     def _build_url(self, message: NotificationMessage) -> str:
         params = self._parse_json(
@@ -89,15 +82,16 @@ class WebhookClient(NotificationClient):
         body_template = self._parse_json(self.webhook_body, "WEBHOOK_BODY")
         rendered_body = self._render_template(body_template, message)
 
+        header_keys_lower = {k.lower() for k in headers}
         if self.webhook_content_type == "JSON":
-            if "Content-Type" not in headers and "content-type" not in headers:
+            if "content-type" not in header_keys_lower:
                 headers["Content-Type"] = "application/json; charset=utf-8"
             return rendered_body, None
 
         if self.webhook_content_type == "FORM":
             if not isinstance(rendered_body, dict):
                 raise ValueError("WEBHOOK_BODY 在 FORM 模式下必须是 JSON 对象")
-            if "Content-Type" not in headers and "content-type" not in headers:
+            if "content-type" not in header_keys_lower:
                 headers["Content-Type"] = "application/x-www-form-urlencoded"
             return None, rendered_body
 
@@ -140,8 +134,11 @@ class WebhookClient(NotificationClient):
             "desktop_link": message.desktop_link,
             "mobile_link": message.mobile_link or message.desktop_link,
         }
-        rendered = value
-        for key, replacement in replacements.items():
-            rendered = rendered.replace(f"${{{key}}}", replacement)
-            rendered = rendered.replace(f"{{{{{key}}}}}", replacement)
-        return rendered
+        pattern = re.compile(
+            r"\$\{(" + "|".join(re.escape(k) for k in replacements) + r")\}"
+            r"|\{\{(" + "|".join(re.escape(k) for k in replacements) + r")\}\}"
+        )
+        def _sub(m: re.Match) -> str:
+            key = m.group(1) or m.group(2)
+            return replacements[key]
+        return pattern.sub(_sub, value)

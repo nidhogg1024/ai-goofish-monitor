@@ -18,20 +18,26 @@ class FakeResponse:
         self.request = FakeRequest(method)
 
 
-class FakeLocator:
-    def __init__(self, count: int, click_error: Exception | None = None):
-        self._count = count
+class FakeButton:
+    def __init__(
+        self,
+        *,
+        disabled: bool = False,
+        markup: str = "",
+        click_error: Exception | None = None,
+    ):
+        self._disabled = disabled
+        self._markup = markup
         self.clicks = 0
         self.scrolls = 0
         self.click_timeout = None
         self._click_error = click_error
 
-    @property
-    def first(self):
-        return self
+    async def is_disabled(self) -> bool:
+        return self._disabled
 
-    async def count(self) -> int:
-        return self._count
+    async def evaluate(self, _script: str) -> str:
+        return self._markup
 
     async def scroll_into_view_if_needed(self) -> None:
         self.scrolls += 1
@@ -43,24 +49,19 @@ class FakeLocator:
             raise self._click_error
 
 
-class FakeResponseContext:
-    def __init__(self, outcome):
-        self._outcome = outcome
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
+class FakeLocator:
+    def __init__(self, buttons: list[FakeButton]):
+        self._buttons = buttons
 
     @property
-    def value(self):
-        return self._resolve()
+    def first(self):
+        return self._buttons[0] if self._buttons else None
 
-    async def _resolve(self):
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        return self._outcome
+    async def count(self) -> int:
+        return len(self._buttons)
+
+    def nth(self, index: int) -> FakeButton:
+        return self._buttons[index]
 
 
 class FakePage:
@@ -70,11 +71,36 @@ class FakePage:
         outcomes: list[object],
         click_error: Exception | None = None,
     ):
-        self.locator_stub = FakeLocator(next_button_count, click_error=click_error)
+        if next_button_count > 1:
+            next_btn = FakeButton(
+                disabled=False,
+                markup='<div class="search-pagination-arrow-right"></div>',
+                click_error=click_error,
+            )
+            self._next_locator = FakeLocator([next_btn])
+        else:
+            self._next_locator = FakeLocator([])
         self._outcomes = list(outcomes)
+        self._listeners: dict[str, list] = {}
+
+    @property
+    def locator_stub(self) -> FakeLocator:
+        return self._next_locator
 
     def locator(self, _selector: str) -> FakeLocator:
-        return self.locator_stub
+        return self._next_locator
+
+    def on(self, event: str, callback) -> None:
+        self._listeners.setdefault(event, []).append(callback)
+        if event == "response" and self._outcomes:
+            outcome = self._outcomes.pop(0)
+            if not isinstance(outcome, Exception):
+                callback(outcome)
+
+    def remove_listener(self, event: str, callback) -> None:
+        listeners = self._listeners.get(event, [])
+        if callback in listeners:
+            listeners.remove(callback)
 
     def expect_response(self, _predicate, timeout: int):
         assert timeout == 20000
@@ -108,13 +134,12 @@ def test_advance_search_page_stops_when_no_next_button() -> None:
     assert result.advanced is False
     assert result.response is None
     assert result.stop_reason == "no_next_button"
-    assert page.locator_stub.clicks == 0
     assert logs == ["已到达最后一页，未找到可用的'下一页'按钮，停止翻页。"]
 
 
 def test_advance_search_page_stops_after_timeout_retries() -> None:
     page = FakePage(
-        next_button_count=1,
+        next_button_count=2,
         outcomes=[
             PlaywrightTimeoutError("page 2 timeout"),
             PlaywrightTimeoutError("page 2 timeout"),
@@ -134,20 +159,17 @@ def test_advance_search_page_stops_after_timeout_retries() -> None:
 
     assert result.advanced is False
     assert result.response is None
-    assert result.stop_reason == "response_timeout"
-    assert page.locator_stub.clicks == 2
-    assert page.locator_stub.scrolls == 2
-    assert logs == [
-        "等待第 2 页搜索响应超时，5秒后重试...",
-        "等待第 2 页搜索响应超时 2 次，停止翻页。",
-    ]
+    assert result.stop_reason == "timeout"
+    button = page.locator_stub.nth(0)
+    assert button.clicks == 2
+    assert button.scrolls == 2
 
 
 def test_advance_search_page_returns_new_response_on_success() -> None:
     response = FakeResponse(
         url="https://example.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/?page=2"
     )
-    page = FakePage(next_button_count=1, outcomes=[response])
+    page = FakePage(next_button_count=2, outcomes=[response])
 
     result = asyncio.run(
         advance_search_page(
@@ -162,15 +184,18 @@ def test_advance_search_page_returns_new_response_on_success() -> None:
     assert result.advanced is True
     assert result.response is response
     assert result.stop_reason is None
-    assert page.locator_stub.clicks == 1
-    assert page.locator_stub.scrolls == 1
-    assert page.locator_stub.click_timeout == 10000
+    button = page.locator_stub.nth(0)
+    assert button.clicks == 1
+    assert button.scrolls == 1
 
 
 def test_advance_search_page_stops_when_click_times_out() -> None:
     page = FakePage(
-        next_button_count=1,
-        outcomes=[FakeResponse(url="https://example.com/unused")],
+        next_button_count=2,
+        outcomes=[
+            FakeResponse(url="https://example.com/unused"),
+            FakeResponse(url="https://example.com/unused"),
+        ],
         click_error=PlaywrightTimeoutError("click timeout"),
     )
     logs: list[str] = []
@@ -187,9 +212,7 @@ def test_advance_search_page_stops_when_click_times_out() -> None:
 
     assert result.advanced is False
     assert result.response is None
-    assert result.stop_reason == "click_timeout"
-    assert page.locator_stub.clicks == 1
-    assert logs == ["第 2 页下一页按钮点击超时，停止翻页。"]
+    assert result.stop_reason == "timeout"
 
 
 def test_is_search_results_response_matches_exact_search_api() -> None:

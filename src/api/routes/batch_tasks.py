@@ -1,6 +1,9 @@
 """
 批量任务生成路由
 """
+import logging
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,12 +17,18 @@ from src.api.dependencies import (
 from src.domain.models.task import TaskGenerateRequest
 from src.services.batch_generation_runner import run_batch_generation
 from src.services.batch_generation_service import BatchGenerationService
+from src.services.task_schedule_service import resolve_request_cron
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_runner import build_criteria_filename, build_task_create
 from src.services.task_intent_service import enrich_generate_request
 from src.services.task_payloads import serialize_task
 from src.services.task_service import TaskService
 
+logger = logging.getLogger(__name__)
+
+# TODO: This router shares the /api/tasks prefix with tasks.py.
+# Changing it would break the existing API contract. Consider migrating
+# to /api/batch-tasks in a future major version with a deprecation period.
 router = APIRouter(prefix="/api/tasks", tags=["batch-tasks"])
 
 
@@ -44,8 +53,10 @@ async def batch_generate(
     if not url and not description:
         raise HTTPException(status_code=400, detail="请至少填写链接或需求描述。")
 
-    if url and not url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="请输入有效的 URL 地址。")
+    if url:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise HTTPException(status_code=400, detail="请输入有效的 URL 地址。")
 
     job = await service.create_job()
     service.track(
@@ -90,13 +101,23 @@ async def batch_create(
     if not req.tasks:
         raise HTTPException(status_code=400, detail="任务列表不能为空。")
 
+    existing_tasks = await task_service.get_all_tasks()
+    planned_task_creates = []
     results = []
     for task_req in req.tasks:
         try:
             task_req = await enrich_generate_request(task_req)
             mode = task_req.decision_mode or "ai"
             criteria_file = build_criteria_filename(task_req.keyword) if mode == "ai" else ""
-            task = await task_service.create_task(build_task_create(task_req, criteria_file))
+            resolved_cron = resolve_request_cron(
+                task_req,
+                existing_tasks=existing_tasks,
+                pending_task_creates=planned_task_creates,
+            )
+            task_create = build_task_create(task_req, criteria_file, cron=resolved_cron)
+            task = await task_service.create_task(task_create)
+            planned_task_creates.append(task_create)
+            existing_tasks.append(task)
             results.append({
                 "success": True,
                 "task": serialize_task(task, scheduler_service),
@@ -108,15 +129,17 @@ async def batch_create(
                 "error": str(exc),
             })
 
-    # Reload scheduler
     try:
         all_tasks = await task_service.get_all_tasks()
         await scheduler_service.reload_jobs(all_tasks)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("批量创建后重新加载调度器失败: %s", exc)
 
     success_count = sum(1 for r in results if r["success"])
+    fail_count = len(results) - success_count
     return {
         "message": f"批量创建完成：{success_count}/{len(results)} 个任务创建成功。",
+        "success_count": success_count,
+        "fail_count": fail_count,
         "results": results,
     }

@@ -79,11 +79,9 @@ def _normalize_text_content(content: str) -> str:
 
 
 def _strip_code_fences(content: str) -> str:
+    import re
     cleaned = content.strip()
-    if cleaned.startswith("```json"):
-        cleaned = cleaned[7:]
-    if cleaned.startswith("```"):
-        cleaned = cleaned[3:]
+    cleaned = re.sub(r"^```\w*\s*\n?", "", cleaned)
     if cleaned.endswith("```"):
         cleaned = cleaned[:-3]
     return cleaned.strip()
@@ -95,15 +93,19 @@ def _extract_first_json_value(
 ):
     decoder = json.JSONDecoder()
     last_error: json.JSONDecodeError | None = None
-
-    for start_index, char in enumerate(content):
+    idx = 0
+    length = len(content)
+    while idx < length:
+        char = content[idx]
         if char not in "{[":
+            idx += 1
             continue
         try:
-            parsed, _ = decoder.raw_decode(content[start_index:])
+            parsed, end = decoder.raw_decode(content, idx)
             return parsed
         except json.JSONDecodeError as exc:
             last_error = exc
+            idx += 1
 
     if last_error is not None:
         raise last_error

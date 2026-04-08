@@ -1,11 +1,29 @@
 """AI 请求兼容性辅助逻辑。"""
 
 import copy
+import logging
 from typing import Any, Dict, Iterable, List
 
+logger = logging.getLogger(__name__)
 
 RESPONSES_API_MODE = "responses"
 CHAT_COMPLETIONS_API_MODE = "chat_completions"
+
+_stream_required: bool = False
+
+
+def mark_stream_required() -> None:
+    """网关要求 stream=true 时调用，后续所有请求都会自动启用。
+
+    Uses a simple bool flag; safe for single-process async apps since
+    Python's GIL ensures atomic reads/writes of simple types.
+    """
+    global _stream_required
+    _stream_required = True
+
+
+def is_stream_required_by_gateway() -> bool:
+    return _stream_required
 INPUT_TEXT_TYPE = "input_text"
 INPUT_IMAGE_TYPE = "input_image"
 IMAGE_DETAIL_AUTO = "auto"
@@ -82,9 +100,10 @@ def add_json_response_format(
 def is_json_output_unsupported_error(error: Exception) -> bool:
     """识别模型不支持结构化 JSON 输出参数的错误。"""
     message = str(error)
+    lower_msg = message.lower()
     return (
-        "not supported" in message.lower()
-        and any(marker in message for marker in UNSUPPORTED_JSON_OUTPUT_MARKERS)
+        ("not supported" in lower_msg or "unsupported" in lower_msg)
+        and any(marker.lower() in lower_msg for marker in UNSUPPORTED_JSON_OUTPUT_MARKERS)
     )
 
 
@@ -194,6 +213,7 @@ async def _collect_stream_text_async(stream: Any) -> str:
             parts.append(_extract_stream_chunk_text(chunk))
         return "".join(parts)
 
+    logger.warning("AI stream 对象不支持 __aiter__，回退到同步迭代（可能阻塞事件循环）")
     for chunk in stream:
         parts.append(_extract_stream_chunk_text(chunk))
     return "".join(parts)

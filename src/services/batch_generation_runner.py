@@ -3,20 +3,24 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import logging
+from string import Template
+from typing import Any, Dict, List, Optional
 
 from src.infrastructure.external.ai_client import AIClient
 from src.services.ai_response_parser import parse_ai_response_json
 from src.services.batch_generation_service import BatchGenerationService
 from src.services.url_content_service import fetch_url_content
 
-BATCH_INTENT_PROMPT = """
+logger = logging.getLogger(__name__)
+
+BATCH_INTENT_PROMPT = Template("""
 你是"闲鱼监控任务批量配置助手"。你的职责是分析用户输入（可能是购物需求描述、装修清单、网页文章内容等），将其中的商品需求拆解成多个独立的闲鱼监控任务配置。
 
 请严格只输出 JSON 数组，不要输出解释，不要输出 Markdown 代码块。
 
 每个数组元素的格式：
-{{
+{
   "task_name": "简短任务名（适合展示在任务列表）",
   "keyword": "适合闲鱼搜索的精简关键词",
   "reason": "推荐理由（1-2 句话，说明为什么推荐监控这个商品，比如文章中的评价、性价比分析、适合用户需求的原因等）",
@@ -27,7 +31,7 @@ BATCH_INTENT_PROMPT = """
   "free_shipping": true,
   "region": "",
   "analyze_images": true
-}}
+}
 
 规则：
 1. 每个独立的商品需求拆成一个任务，不要合并不同品类的商品。
@@ -40,8 +44,8 @@ BATCH_INTENT_PROMPT = """
 8. 如果输入内容无法识别出任何商品需求，输出包含 1 个元素的数组，task_name 设为 "未识别需求"。
 
 用户输入如下：
-{user_input}
-"""
+$user_input
+""")
 
 
 def _normalize_preview(raw: Any) -> Dict[str, Any]:
@@ -92,6 +96,8 @@ def _normalize_previews(parsed: Any) -> List[Dict[str, Any]]:
         normalized = _normalize_preview(item)
         if normalized.get("keyword"):
             results.append(normalized)
+        else:
+            logger.warning("跳过无 keyword 的预览项: %s", normalized.get("task_name", "<unknown>"))
     return results
 
 
@@ -101,6 +107,7 @@ async def run_batch_generation(
     url: str | None,
     description: str | None,
     service: BatchGenerationService,
+    ai_client: Optional[AIClient] = None,
 ) -> None:
     """执行批量任务解析的后台作业。"""
     try:
@@ -118,22 +125,25 @@ async def run_batch_generation(
 
         # Step 2: analyze
         await service.advance(job_id, "analyze", "正在调用 AI 深度分析…")
-        ai_client = AIClient()
+        owns_client = ai_client is None
+        if owns_client:
+            ai_client = AIClient()
         try:
             if not ai_client.is_available():
                 ai_client.refresh()
             if not ai_client.is_available():
                 raise RuntimeError("AI 客户端不可用，请检查 AI 配置。")
 
-            prompt = BATCH_INTENT_PROMPT.format(user_input=combined_input)
-            response_text = await ai_client._call_ai(
+            prompt = BATCH_INTENT_PROMPT.safe_substitute(user_input=combined_input)
+            response_text = await ai_client.call_ai(
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_output_tokens=4000,
                 enable_json_output=True,
             )
         finally:
-            await ai_client.close()
+            if owns_client:
+                await ai_client.close()
 
         # Step 3: parse
         await service.advance(job_id, "parse", "正在解析任务配置…")

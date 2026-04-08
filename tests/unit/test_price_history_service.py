@@ -96,4 +96,4 @@ def test_record_market_snapshots_and_build_price_history_insights(tmp_path, monk
     assert item_context["min_price"] == 9500.0
     assert item_context["max_price"] == 10000.0
     assert item_context["price_change_amount"] == -500.0
-    assert item_context["deal_label"] == "高性价比"
+    assert item_context["deal_label"] == "值得关注"

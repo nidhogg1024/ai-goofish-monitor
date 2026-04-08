@@ -35,20 +35,34 @@ def test_notification_service_collects_success_and_failure_results():
 
 
 def test_webhook_client_renders_json_templates(monkeypatch):
+    import httpx
+
     captured = {}
 
-    class _FakeResponse:
+    class _FakeHttpxResponse:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
-    def _fake_post(url, headers=None, json=None, data=None, timeout=None):
-        captured["url"] = url
-        captured["headers"] = headers
-        captured["json"] = json
-        captured["data"] = data
-        return _FakeResponse()
+    class _FakeHttpxAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
 
-    monkeypatch.setattr("requests.post", _fake_post)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers")
+            captured["json"] = kwargs.get("json")
+            captured["data"] = kwargs.get("data")
+            return _FakeHttpxResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeHttpxAsyncClient)
 
     client = WebhookClient(
         webhook_url="https://hooks.example.com/notify",

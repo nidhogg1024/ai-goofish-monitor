@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
@@ -6,18 +7,23 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from src.utils import log_time, random_sleep
 
-NEXT_PAGE_SELECTOR = (
-    "button[class*='search-pagination-arrow-container']"
-    ":has([class*='search-pagination-arrow-right'])"
-    ":not([disabled])"
-)
+logger = logging.getLogger(__name__)
+
 SEARCH_RESULTS_API_FRAGMENT = "/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/"
-PAGE_REQUEST_TIMEOUT_MS = 20_000
-PAGE_CLICK_TIMEOUT_MS = 10_000
+
+NEXT_PAGE_SELECTORS = [
+    "[class*='search-pagination-arrow-right']:not([class*='disabled'])",
+    ".ant-pagination-next:not(.ant-pagination-disabled)",
+    "li.ant-pagination-next > button",
+    "button[aria-label='next']",
+    "button[aria-label='Next']",
+]
+
+PAGE_REQUEST_TIMEOUT_SEC = 20
 PAGE_RETRY_DELAY_SECONDS = 5
 PAGE_RETRY_COUNT = 2
-PAGE_CLICK_SLEEP_MIN_SECONDS = 2
-PAGE_CLICK_SLEEP_MAX_SECONDS = 5
+PAGE_CLICK_SLEEP_MIN = 2.0
+PAGE_CLICK_SLEEP_MAX = 5.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,39 @@ def is_search_results_response(
     return api_url_fragment in response_url and request_method == "POST"
 
 
+async def _find_next_button(page: Any, logger: Callable[[str], None] = log_time) -> Optional[Any]:
+    for selector in NEXT_PAGE_SELECTORS:
+        locator = page.locator(selector)
+        if await locator.count() > 0:
+            logger(f"[翻页] 匹配到下一页按钮: {selector}")
+            return locator.first
+    return None
+
+
+async def _wait_for_search_response(
+    page: Any,
+    timeout_sec: float,
+) -> Optional[Any]:
+    """监听页面响应事件，捕获搜索 API 的返回（兼容 AJAX 和全页导航）。"""
+    loop = asyncio.get_running_loop()
+    captured: asyncio.Future = loop.create_future()
+
+    def on_response(response: Any) -> None:
+        try:
+            if not captured.done() and is_search_results_response(response):
+                captured.set_result(response)
+        except Exception as exc:
+            logger.warning("on_response 回调异常: %s", exc)
+
+    page.on("response", on_response)
+    try:
+        return await asyncio.wait_for(captured, timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        page.remove_listener("response", on_response)
+
+
 async def advance_search_page(
     *,
     page: Any,
@@ -46,44 +85,46 @@ async def advance_search_page(
     retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_retries: int = PAGE_RETRY_COUNT,
 ) -> PageAdvanceResult:
-    next_button = page.locator(NEXT_PAGE_SELECTOR).first
-    if not await next_button.count():
+    """点击"下一页"按钮并等待搜索 API 返回新数据。"""
+
+    next_button = await _find_next_button(page, logger)
+    if not next_button:
         logger("已到达最后一页，未找到可用的'下一页'按钮，停止翻页。")
         return PageAdvanceResult(advanced=False, stop_reason="no_next_button")
 
     for retry_index in range(max_retries):
+        response_task = asyncio.create_task(
+            _wait_for_search_response(page, PAGE_REQUEST_TIMEOUT_SEC)
+        )
+
         try:
             await next_button.scroll_into_view_if_needed()
-            async with page.expect_response(
-                is_search_results_response,
-                timeout=PAGE_REQUEST_TIMEOUT_MS,
-            ) as response_info:
-                try:
-                    await next_button.click(timeout=PAGE_CLICK_TIMEOUT_MS)
-                except PlaywrightTimeoutError:
-                    logger(f"第 {page_num} 页下一页按钮点击超时，停止翻页。")
-                    return PageAdvanceResult(
-                        advanced=False,
-                        stop_reason="click_timeout",
-                    )
-            await wait_after_click(
-                PAGE_CLICK_SLEEP_MIN_SECONDS,
-                PAGE_CLICK_SLEEP_MAX_SECONDS,
-            )
-            return PageAdvanceResult(
-                advanced=True,
-                response=await response_info.value,
-            )
-        except PlaywrightTimeoutError:
-            if retry_index < max_retries - 1:
-                logger(
-                    f"等待第 {page_num} 页搜索响应超时，"
-                    f"{PAGE_RETRY_DELAY_SECONDS}秒后重试..."
-                )
-                await retry_sleep(PAGE_RETRY_DELAY_SECONDS)
-                continue
+            await next_button.click()
+            await wait_after_click(PAGE_CLICK_SLEEP_MIN, PAGE_CLICK_SLEEP_MAX)
 
-            logger(f"等待第 {page_num} 页搜索响应超时 {max_retries} 次，停止翻页。")
-            return PageAdvanceResult(advanced=False, stop_reason="response_timeout")
+            response = await response_task
+
+            if response and response.ok:
+                logger(f"成功翻到第 {page_num} 页。")
+                return PageAdvanceResult(advanced=True, response=response)
+
+            logger(f"翻页到第 {page_num} 页后未收到有效的搜索 API 响应。")
+
+        except Exception as exc:
+            if not response_task.done():
+                response_task.cancel()
+            logger(f"翻页到第 {page_num} 页出错: {exc}")
+
+        if retry_index < max_retries - 1:
+            logger(f"翻页到第 {page_num} 页超时，{PAGE_RETRY_DELAY_SECONDS}秒后重试...")
+            await retry_sleep(PAGE_RETRY_DELAY_SECONDS)
+            next_button = await _find_next_button(page, logger)
+            if not next_button:
+                logger("重试时未找到'下一页'按钮，停止翻页。")
+                return PageAdvanceResult(advanced=False, stop_reason="no_next_button")
+            continue
+
+        logger(f"翻页到第 {page_num} 页超时 {max_retries} 次，停止翻页。")
+        return PageAdvanceResult(advanced=False, stop_reason="timeout")
 
     return PageAdvanceResult(advanced=False, stop_reason="unknown")

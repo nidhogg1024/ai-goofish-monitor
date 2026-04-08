@@ -11,6 +11,46 @@ import type {
   SystemStatus
 } from '@/api/settings'
 
+const PROBE_CACHE_KEY = 'ai_model_probe_cache'
+const MODELS_CACHE_KEY = 'ai_model_list_cache'
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+
+function loadCachedModels(): { models: string[]; source: string } | null {
+  try {
+    const raw = localStorage.getItem(MODELS_CACHE_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw)
+    if (Date.now() - (data.ts || 0) > CACHE_TTL_MS) {
+      localStorage.removeItem(MODELS_CACHE_KEY)
+      return null
+    }
+    if (!Array.isArray(data.models)) return null
+    return { models: data.models, source: data.source || '' }
+  } catch { return null }
+}
+
+function saveCachedModels(models: string[], source: string) {
+  localStorage.setItem(MODELS_CACHE_KEY, JSON.stringify({ models, source, ts: Date.now() }))
+}
+
+function loadCachedProbe(): AiModelProbeItem[] {
+  try {
+    const raw = localStorage.getItem(PROBE_CACHE_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw)
+    if (Date.now() - (data.ts || 0) > CACHE_TTL_MS) {
+      localStorage.removeItem(PROBE_CACHE_KEY)
+      return []
+    }
+    if (!Array.isArray(data.items)) return []
+    return data.items
+  } catch { return [] }
+}
+
+function saveCachedProbe(items: AiModelProbeItem[]) {
+  localStorage.setItem(PROBE_CACHE_KEY, JSON.stringify({ items, ts: Date.now() }))
+}
+
 export function useSettings() {
   const notificationSettings = ref<NotificationSettings>({})
   const aiSettings = ref<AiSettings>({})
@@ -23,9 +63,17 @@ export function useSettings() {
   
   const isLoading = ref(false)
   const isSaving = ref(false)
+  const savingKeys = ref<Set<string>>(new Set())
   const isLoadingAiModels = ref(false)
   const isProbingAiModels = ref(false)
   const error = ref<Error | null>(null)
+
+  function setSavingKey(key: string, active: boolean) {
+    const next = new Set(savingKeys.value)
+    if (active) next.add(key)
+    else next.delete(key)
+    savingKeys.value = next
+  }
 
   function buildAiModelLookupPayload(overrides?: Partial<AiSettings>): AiModelListRequest {
     const source = { ...aiSettings.value, ...(overrides || {}) }
@@ -46,7 +94,7 @@ export function useSettings() {
       const response = await settingsApi.listAiModels(buildAiModelLookupPayload(overrides))
       aiModelOptions.value = response.models
       aiModelListSource.value = response.source_url
-      aiModelChecks.value = []
+      saveCachedModels(response.models, response.source_url)
 
       const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
       if (!currentModel && response.models.length > 0) {
@@ -56,7 +104,6 @@ export function useSettings() {
     } catch (e) {
       aiModelOptions.value = []
       aiModelListSource.value = ''
-      aiModelChecks.value = []
       if (e instanceof Error) error.value = e
       throw e
     } finally {
@@ -79,6 +126,7 @@ export function useSettings() {
         force_refresh: forceRefresh,
       })
       aiModelChecks.value = response.items
+      saveCachedProbe(response.items)
       return response
     } catch (e) {
       aiModelChecks.value = []
@@ -103,17 +151,15 @@ export function useSettings() {
       aiSettings.value = ai
       rotationSettings.value = rotation
       systemStatus.value = status
-      if ((ai.OPENAI_BASE_URL || '').trim()) {
-        try {
-          const catalog = await loadAiModels(ai)
-          await probeAiModels(catalog.models, ai)
-        } catch {
-          // 模型列表加载失败时不阻塞设置页初始化。
-        }
-      } else {
-        aiModelOptions.value = []
-        aiModelListSource.value = ''
-        aiModelChecks.value = []
+
+      const cachedModels = loadCachedModels()
+      if (cachedModels) {
+        aiModelOptions.value = cachedModels.models
+        aiModelListSource.value = cachedModels.source
+      }
+      const cachedProbe = loadCachedProbe()
+      if (cachedProbe.length > 0) {
+        aiModelChecks.value = cachedProbe
       }
     } catch (e) {
       if (e instanceof Error) error.value = e
@@ -138,6 +184,7 @@ export function useSettings() {
 
   async function saveNotificationSettings(payload: NotificationSettingsUpdate) {
     isSaving.value = true
+    setSavingKey('notifications', true)
     try {
       await settingsApi.updateNotificationSettings(payload)
       const [notif, status] = await Promise.all([
@@ -151,6 +198,7 @@ export function useSettings() {
       throw e
     } finally {
       isSaving.value = false
+      setSavingKey('notifications', false)
     }
   }
 
@@ -171,6 +219,7 @@ export function useSettings() {
 
   async function saveAiSettings() {
     isSaving.value = true
+    setSavingKey('ai', true)
     try {
       const payload = { ...aiSettings.value }
       const apiKey = (payload.OPENAI_API_KEY || '').trim()
@@ -183,26 +232,19 @@ export function useSettings() {
       if (aiSettings.value.OPENAI_API_KEY) {
         aiSettings.value.OPENAI_API_KEY = ''
       }
-      // Refresh status
       systemStatus.value = await settingsApi.getSystemStatus()
-      if ((aiSettings.value.OPENAI_BASE_URL || '').trim()) {
-        try {
-          const catalog = await loadAiModels()
-          await probeAiModels(catalog.models)
-        } catch {
-          // 保存成功即可，模型列表失败由页面单独重试。
-        }
-      }
     } catch (e) {
       if (e instanceof Error) error.value = e
       throw e
     } finally {
       isSaving.value = false
+      setSavingKey('ai', false)
     }
   }
 
   async function saveRotationSettings() {
     isSaving.value = true
+    setSavingKey('rotation', true)
     try {
       await settingsApi.updateRotationSettings(rotationSettings.value)
     } catch (e) {
@@ -210,6 +252,7 @@ export function useSettings() {
       throw e
     } finally {
       isSaving.value = false
+      setSavingKey('rotation', false)
     }
   }
 
@@ -245,6 +288,7 @@ export function useSettings() {
     systemStatus,
     isLoading,
     isSaving,
+    savingKeys,
     isLoadingAiModels,
     isProbingAiModels,
     isReady,

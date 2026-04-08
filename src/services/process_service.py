@@ -5,6 +5,7 @@
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import sys
@@ -15,7 +16,11 @@ from src.ai_handler import send_ntfy_notification
 from src.config import STATE_FILE
 from src.failure_guard import FailureGuard
 from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync
+from src.infrastructure.config.settings import settings as app_settings
+from src.risk_control_guard import GlobalRiskControlGuard
 from src.utils import build_task_log_path
+
+logger = logging.getLogger(__name__)
 
 STOP_TIMEOUT_SECONDS = 20
 SPIDER_DEBUG_LIMIT_ENV = "SPIDER_DEBUG_LIMIT"
@@ -32,6 +37,9 @@ class ProcessService:
         self.task_names: Dict[int, str] = {}
         self.exit_watchers: Dict[int, asyncio.Task] = {}
         self.failure_guard = FailureGuard()
+        self.global_risk_guard = GlobalRiskControlGuard(
+            cooldown_seconds=app_settings.risk_control_cooldown_seconds
+        )
         self._on_started: LifecycleHook | None = None
         self._on_stopped: LifecycleHook | None = None
 
@@ -51,8 +59,8 @@ class ProcessService:
         if asyncio.iscoroutine(result):
             await result
 
-    def _resolve_cookie_path(self, task_name: str) -> str | None:
-        """Best-effort cookie/state path for a task."""
+    def _resolve_cookie_path_sync(self, task_name: str) -> str | None:
+        """Best-effort cookie/state path for a task (synchronous)."""
         try:
             task = find_task_by_name_sync(task_name)
             if task and isinstance(task.account_state_file, str) and task.account_state_file.strip():
@@ -62,10 +70,28 @@ class ProcessService:
 
         return STATE_FILE if os.path.exists(STATE_FILE) else None
 
+    async def _resolve_cookie_path(self, task_name: str) -> str | None:
+        return await asyncio.to_thread(self._resolve_cookie_path_sync, task_name)
+
     def is_running(self, task_id: int) -> bool:
         """检查任务是否正在运行"""
         process = self.processes.get(task_id)
         return process is not None and process.returncode is None
+
+    def cleanup_finished(self) -> None:
+        """清理已退出的进程条目。"""
+        finished: list[int] = []
+        for task_id, process in self.processes.items():
+            if process.returncode is not None:
+                finished.append(task_id)
+        for task_id in finished:
+            process = self.processes.get(task_id)
+            if process is not None:
+                self._cleanup_runtime(task_id, process)
+
+    def running_count(self) -> int:
+        """返回当前仍在运行的任务进程数。"""
+        return sum(1 for p in self.processes.values() if p.returncode is None)
 
     async def _drain_finished_process(self, task_id: int) -> None:
         process = self.processes.get(task_id)
@@ -81,6 +107,8 @@ class ProcessService:
         await self._invoke_hook(self._on_stopped, task_id)
 
     def _open_log_file(self, task_id: int, task_name: str) -> tuple[str, TextIO]:
+        # Synchronous open; acceptable because log writes are infrequent and
+        # subprocess stdout/stderr need a real file descriptor.
         os.makedirs("logs", exist_ok=True)
         log_file_path = build_task_log_path(task_id, task_name)
         log_file_handle = open(log_file_path, "a", encoding="utf-8")
@@ -134,12 +162,26 @@ class ProcessService:
         """启动任务进程"""
         await self._drain_finished_process(task_id)
         if self.is_running(task_id):
-            print(f"任务 '{task_name}' (ID: {task_id}) 已在运行中")
+            logger.info("任务 '%s' (ID: %d) 已在运行中", task_name, task_id)
+            return False
+
+        global_risk_decision = self.global_risk_guard.should_skip_start()
+        if global_risk_decision.skip:
+            paused_until = (
+                global_risk_decision.cooldown_until.strftime("%Y-%m-%d %H:%M:%S")
+                if global_risk_decision.cooldown_until
+                else "N/A"
+            )
+            logger.warning(
+                "[GlobalRiskGuard] 跳过启动任务 '%s'，当前处于全局风控冷却期。"
+                " 原因: %s; 冷却到: %s",
+                task_name, global_risk_decision.reason, paused_until,
+            )
             return False
 
         decision = self.failure_guard.should_skip_start(
             task_name,
-            cookie_path=self._resolve_cookie_path(task_name),
+            cookie_path=await self._resolve_cookie_path(task_name),
         )
         if decision.skip:
             await self._notify_skip(task_name, decision)
@@ -152,18 +194,19 @@ class ProcessService:
             process = await self._spawn_process(task_name, log_file_handle)
         except Exception as exc:
             self._close_log_handle(log_file_handle)
-            print(f"启动任务 '{task_name}' 失败: {exc}")
+            logger.error("启动任务 '%s' 失败: %s", task_name, exc)
             return False
 
         self._register_runtime(task_id, task_name, process, log_file_path, log_file_handle)
-        print(f"启动任务 '{task_name}' (PID: {process.pid})")
+        logger.info("启动任务 '%s' (PID: %d)", task_name, process.pid)
         await self._invoke_hook(self._on_started, task_id)
         return True
 
     async def _notify_skip(self, task_name: str, decision) -> None:
-        print(
-            f"[FailureGuard] 跳过启动任务 '{task_name}'，已暂停重试 "
-            f"(连续失败 {decision.consecutive_failures}/{self.failure_guard.threshold})"
+        logger.warning(
+            "[FailureGuard] 跳过启动任务 '%s'，已暂停重试 "
+            "(连续失败 %d/%d)",
+            task_name, decision.consecutive_failures, self.failure_guard.threshold,
         )
         if not decision.should_notify:
             return
@@ -181,7 +224,7 @@ class ProcessService:
                 "修复方法: 更新登录态/cookies文件后会自动恢复。",
             )
         except Exception as exc:
-            print(f"发送任务暂停通知失败: {exc}")
+            logger.error("发送任务暂停通知失败: %s", exc)
 
     async def _watch_process_exit(self, process: asyncio.subprocess.Process) -> None:
         await process.wait()
@@ -224,31 +267,31 @@ class ProcessService:
             with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(f"[{timestamp}] !!! 任务已被终止 !!!\n")
         except Exception as exc:
-            print(f"写入任务终止标记失败: {exc}")
+            logger.error("写入任务终止标记失败: %s", exc)
 
     async def stop_task(self, task_id: int) -> bool:
         """停止任务进程"""
         await self._drain_finished_process(task_id)
         process = self.processes.get(task_id)
         if process is None:
-            print(f"任务 ID {task_id} 没有正在运行的进程")
+            logger.debug("任务 ID %d 没有正在运行的进程", task_id)
             return False
         if process.returncode is not None:
             await self._await_exit_watcher(task_id)
-            print(f"任务进程 {process.pid} (ID: {task_id}) 已退出，略过停止")
+            logger.debug("任务进程 %d (ID: %d) 已退出，略过停止", process.pid, task_id)
             return False
 
         try:
             await self._terminate_process(process, task_id)
             self._append_stop_marker(self.log_paths.get(task_id))
             await self._await_exit_watcher(task_id)
-            print(f"任务进程 {process.pid} (ID: {task_id}) 已终止")
+            logger.info("任务进程 %d (ID: %d) 已终止", process.pid, task_id)
             return True
         except ProcessLookupError:
-            print(f"进程 (ID: {task_id}) 已不存在")
+            logger.debug("进程 (ID: %d) 已不存在", task_id)
             return False
         except Exception as exc:
-            print(f"停止任务进程 (ID: {task_id}) 时出错: {exc}")
+            logger.error("停止任务进程 (ID: %d) 时出错: %s", task_id, exc)
             return False
 
     async def _terminate_process(
@@ -257,7 +300,15 @@ class ProcessService:
         task_id: int,
     ) -> None:
         if sys.platform != "win32":
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            try:
+                pgid = os.getpgid(process.pid)
+            except ProcessLookupError:
+                return
+            if pgid == os.getpgrp():
+                logger.warning("进程 %d 的 PGID 与当前进程组相同，回退到 process.terminate()", process.pid)
+                process.terminate()
+            else:
+                os.killpg(pgid, signal.SIGTERM)
         else:
             process.terminate()
 
@@ -265,14 +316,18 @@ class ProcessService:
             await asyncio.wait_for(process.wait(), timeout=STOP_TIMEOUT_SECONDS)
             return
         except asyncio.TimeoutError:
-            print(
-                f"任务进程 {process.pid} (ID: {task_id}) 未在 "
-                f"{STOP_TIMEOUT_SECONDS} 秒内退出，准备强制终止..."
+            logger.warning(
+                "任务进程 %d (ID: %d) 未在 %d 秒内退出，准备强制终止...",
+                process.pid, task_id, STOP_TIMEOUT_SECONDS,
             )
 
         if sys.platform != "win32":
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                pgid = os.getpgid(process.pid)
+                if pgid != os.getpgrp():
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    process.kill()
         else:
             process.kill()
         await process.wait()
@@ -283,22 +338,27 @@ class ProcessService:
             return
         await asyncio.shield(watcher)
 
-    def reindex_after_delete(self, deleted_task_id: int) -> None:
-        """删除任务后同步重排运行时索引，避免任务下标漂移。"""
-        self.processes = self._reindex_mapping(self.processes, deleted_task_id)
-        self.log_paths = self._reindex_mapping(self.log_paths, deleted_task_id)
-        self.log_handles = self._reindex_mapping(self.log_handles, deleted_task_id)
-        self.task_names = self._reindex_mapping(self.task_names, deleted_task_id)
-        self.exit_watchers = self._reindex_mapping(self.exit_watchers, deleted_task_id)
+    async def wait_for_task_exit(self, task_id: int) -> None:
+        """等待某个任务进程退出。若已退出则立即返回。"""
+        await self._drain_finished_process(task_id)
+        if not self.is_running(task_id):
+            return
+        await self._await_exit_watcher(task_id)
 
-    def _reindex_mapping(self, mapping: Dict[int, object], deleted_task_id: int) -> Dict[int, object]:
-        reindexed: Dict[int, object] = {}
-        for task_id, value in mapping.items():
-            if task_id == deleted_task_id:
-                continue
-            next_task_id = task_id - 1 if task_id > deleted_task_id else task_id
-            reindexed[next_task_id] = value
-        return reindexed
+    def reindex_after_delete(self, deleted_task_id: int) -> None:
+        """删除任务后从运行时索引中移除对应条目。
+
+        不再做 ID 减 1 重排，因为数据库中 task ID 不保证连续。
+        只需要移除被删除任务的映射即可。
+        """
+        for mapping in (
+            self.processes,
+            self.log_paths,
+            self.log_handles,
+            self.task_names,
+            self.exit_watchers,
+        ):
+            mapping.pop(deleted_task_id, None)
 
     async def stop_all(self) -> None:
         """停止所有任务进程"""

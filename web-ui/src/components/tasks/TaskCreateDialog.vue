@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { createTaskWithAI } from '@/api/tasks'
 import { useTaskGenerationJob } from '@/composables/useTaskGenerationJob'
@@ -30,6 +30,7 @@ const emit = defineEmits<{
 }>()
 
 const route = useRoute()
+const router = useRouter()
 const isFormOpen = ref(false)
 const isProgressOpen = ref(false)
 const isSubmitting = ref(false)
@@ -74,6 +75,13 @@ async function handleCreateTask(data: TaskGenerateRequest) {
     }
   }
 }
+
+watch(isFormOpen, (open) => {
+  if (!open && route.query.create) {
+    const { create, account, ...rest } = route.query
+    router.replace({ query: rest })
+  }
+})
 
 watch(
   () => [route.query, props.accountOptions],

@@ -2,9 +2,13 @@
 任务管理服务
 封装任务相关的业务逻辑
 """
+import logging
 from typing import List, Optional
 from src.domain.models.task import Task, TaskCreate, TaskUpdate
 from src.domain.repositories.task_repository import TaskRepository
+from src.services.task_taxonomy_service import ensure_task_taxonomy_payload
+
+logger = logging.getLogger(__name__)
 
 
 class TaskService:
@@ -24,6 +28,7 @@ class TaskService:
     async def create_task(self, task_create: TaskCreate) -> Task:
         """创建新任务"""
         task = Task(**task_create.model_dump(), is_running=False)
+        logger.info("创建任务: %s", task.task_name)
         return await self.repository.save(task)
 
     async def update_task(self, task_id: int, task_update: TaskUpdate) -> Task:
@@ -33,10 +38,17 @@ class TaskService:
             raise ValueError(f"任务 {task_id} 不存在")
 
         updated_task = task.apply_update(task_update)
+        payload = ensure_task_taxonomy_payload(updated_task.model_dump())
+        updated_task = updated_task.model_copy(update={
+            "category": payload["category"],
+            "group_name": payload["group_name"],
+        })
+        logger.info("更新任务: id=%d", task_id)
         return await self.repository.save(updated_task)
 
     async def delete_task(self, task_id: int) -> bool:
         """删除任务"""
+        logger.info("删除任务: id=%d", task_id)
         return await self.repository.delete(task_id)
 
     async def update_task_status(self, task_id: int, is_running: bool) -> Task:

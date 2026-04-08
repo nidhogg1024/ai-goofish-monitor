@@ -14,8 +14,8 @@ def normalize_text(value: str) -> str:
     return " ".join((value or "").lower().split())
 
 
-def _collect_text_fragments(value: Any, bucket: List[str]) -> None:
-    if value is None:
+def _collect_text_fragments(value: Any, bucket: List[str], *, _depth: int = 0, _max_depth: int = 10) -> None:
+    if value is None or _depth > _max_depth:
         return
     if isinstance(value, str):
         text = value.strip()
@@ -27,11 +27,11 @@ def _collect_text_fragments(value: Any, bucket: List[str]) -> None:
         return
     if isinstance(value, dict):
         for item in value.values():
-            _collect_text_fragments(item, bucket)
+            _collect_text_fragments(item, bucket, _depth=_depth + 1, _max_depth=_max_depth)
         return
     if isinstance(value, list):
         for item in value:
-            _collect_text_fragments(item, bucket)
+            _collect_text_fragments(item, bucket, _depth=_depth + 1, _max_depth=_max_depth)
 
 
 def build_search_text(record: Dict[str, Any]) -> str:

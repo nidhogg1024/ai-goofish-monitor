@@ -6,6 +6,7 @@ export function useLogs() {
   const logs = ref('')
   const currentPos = ref(0)
   const currentTaskId = ref<number | null>(null)
+  const currentTaskIds = ref<number[]>([])
   const historyOffset = ref(0)
   const hasMoreHistory = ref(false)
   const isFetchingHistory = ref(false)
@@ -30,15 +31,17 @@ export function useLogs() {
 
   async function fetchLogs() {
     if (isLoading.value) return
-    if (currentTaskId.value === null) return
+    if (currentTaskId.value === null && currentTaskIds.value.length === 0) return
     isLoading.value = true
     try {
-      const data = await logsApi.getLogs(currentPos.value, currentTaskId.value)
+      const data = await logsApi.getLogs(currentPos.value, currentTaskId.value, currentTaskIds.value)
       if (data.new_pos < currentPos.value) {
         // Log file rotated or cleared.
         logs.value = ''
       }
-      if (data.new_content) {
+      if (currentTaskIds.value.length > 1) {
+        logs.value = data.new_content || ''
+      } else if (data.new_content) {
         appendLogs(data.new_content)
       }
       currentPos.value = data.new_pos
@@ -51,10 +54,10 @@ export function useLogs() {
 
   async function loadLatest(limitLines: number = 50) {
     if (isFetchingHistory.value) return
-    if (currentTaskId.value === null) return
+    if (currentTaskId.value === null && currentTaskIds.value.length === 0) return
     isFetchingHistory.value = true
     try {
-      const data = await logsApi.getLogTail(currentTaskId.value, 0, limitLines)
+      const data = await logsApi.getLogTail(currentTaskId.value, 0, limitLines, currentTaskIds.value)
       logs.value = data.content || ''
       historyOffset.value = data.next_offset
       hasMoreHistory.value = data.has_more
@@ -69,10 +72,10 @@ export function useLogs() {
   async function loadPrevious(limitLines: number = 50) {
     if (isFetchingHistory.value) return
     if (!hasMoreHistory.value) return
-    if (currentTaskId.value === null) return
+    if (currentTaskId.value === null && currentTaskIds.value.length === 0) return
     isFetchingHistory.value = true
     try {
-      const data = await logsApi.getLogTail(currentTaskId.value, historyOffset.value, limitLines)
+      const data = await logsApi.getLogTail(currentTaskId.value, historyOffset.value, limitLines, currentTaskIds.value)
       if (data.content) {
         logs.value = logs.value ? `${data.content}\n${logs.value}` : data.content
       }
@@ -88,8 +91,8 @@ export function useLogs() {
 
   async function clearLogs() {
     try {
-      if (currentTaskId.value === null) return
-      await logsApi.clearLogs(currentTaskId.value)
+      if (currentTaskId.value === null && currentTaskIds.value.length === 0) return
+      await logsApi.clearLogs(currentTaskId.value, currentTaskIds.value)
       logs.value = ''
       currentPos.value = 0
       historyOffset.value = 0
@@ -100,16 +103,27 @@ export function useLogs() {
     }
   }
 
-  function startAutoRefresh() {
+  function scheduleNextRefresh() {
     if (refreshInterval) return
-    fetchLogs() // Fetch immediately
-    refreshInterval = window.setInterval(fetchLogs, 2000)
+    refreshInterval = window.setTimeout(async () => {
+      refreshInterval = null
+      await fetchLogs()
+      if (isAutoRefresh.value) {
+        scheduleNextRefresh()
+      }
+    }, 2000)
+  }
+
+  function startAutoRefresh() {
+    if (isAutoRefresh.value && refreshInterval) return
     isAutoRefresh.value = true
+    fetchLogs()
+    scheduleNextRefresh()
   }
 
   function stopAutoRefresh() {
     if (refreshInterval) {
-      clearInterval(refreshInterval)
+      clearTimeout(refreshInterval)
       refreshInterval = null
     }
     isAutoRefresh.value = false
@@ -123,9 +137,15 @@ export function useLogs() {
     }
   }
 
-  function setTaskId(taskId: number | null) {
-    if (currentTaskId.value === taskId) return
+  function setScope(taskId: number | null, taskIds: number[] = []) {
+    const normalizedTaskIds = [...taskIds].sort((a, b) => a - b)
+    const unchanged =
+      currentTaskId.value === taskId &&
+      currentTaskIds.value.length === normalizedTaskIds.length &&
+      currentTaskIds.value.every((value, index) => value === normalizedTaskIds[index])
+    if (unchanged) return
     currentTaskId.value = taskId
+    currentTaskIds.value = normalizedTaskIds
     logs.value = ''
     currentPos.value = 0
     historyOffset.value = 0
@@ -150,7 +170,7 @@ export function useLogs() {
     fetchLogs,
     clearLogs,
     toggleAutoRefresh,
-    setTaskId,
+    setScope,
     loadLatest,
     loadPrevious
   }

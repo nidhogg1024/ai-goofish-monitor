@@ -1,9 +1,10 @@
 """
 Bark 通知客户端
 """
-import asyncio
-import requests
-from typing import Dict
+from typing import Dict, Optional
+
+import httpx
+
 from .base import NotificationClient
 
 
@@ -13,7 +14,7 @@ class BarkClient(NotificationClient):
     channel_key = "bark"
     display_name = "Bark"
 
-    def __init__(self, bark_url: str = None, pcurl_to_mobile: bool = True):
+    def __init__(self, bark_url: Optional[str] = None, pcurl_to_mobile: bool = True):
         super().__init__(enabled=bool(bark_url), pcurl_to_mobile=pcurl_to_mobile)
         self.bark_url = bark_url
 
@@ -35,14 +36,10 @@ class BarkClient(NotificationClient):
             bark_payload["icon"] = message.image_url
 
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
                 self.bark_url,
                 json=bark_payload,
                 headers=headers,
-                timeout=10
             )
-        )
-        response.raise_for_status()
+            response.raise_for_status()

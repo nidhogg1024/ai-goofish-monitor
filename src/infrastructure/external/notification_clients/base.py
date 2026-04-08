@@ -36,7 +36,7 @@ class NotificationClient(ABC):
         return self._enabled
 
     @abstractmethod
-    async def send(self, product_data: Dict, reason: str) -> bool:
+    async def send(self, product_data: Dict, reason: str) -> None:
         """
         发送通知
 
@@ -44,13 +44,15 @@ class NotificationClient(ABC):
             product_data: 商品数据
             reason: 推荐原因
 
-        Returns:
-            是否发送成功
+        Raises:
+            RuntimeError: 发送失败
         """
         raise NotImplementedError
 
     def _build_message(self, product_data: Dict, reason: str) -> NotificationMessage:
         """格式化消息内容"""
+        # TODO: Chinese keys like '商品标题' are intentional for this Chinese-market app;
+        #       consider extracting to constants if i18n is ever needed.
         title = product_data.get('商品标题', 'N/A')
         price = product_data.get('当前售价', 'N/A')
         desktop_link = product_data.get('商品链接', '#')
@@ -69,6 +71,8 @@ class NotificationClient(ABC):
         else:
             content_lines.append(f"链接: {desktop_link}")
 
+        # Truncation uses Python str length (code points); CJK wide characters
+        # may exceed visual width expectations in fixed-width displays.
         short_title = title[:30]
         suffix = "..." if len(title) > 30 else ""
         notification_title = f"🚨 新推荐! {short_title}{suffix}"

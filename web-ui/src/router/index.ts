@@ -57,7 +57,10 @@ const routes = [
   {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
-    redirect: '/',
+    redirect: (to: { fullPath: string }) => {
+      console.warn(`[router] 404 – "${to.fullPath}" not found, redirecting to /`)
+      return '/'
+    },
   },
 ]
 

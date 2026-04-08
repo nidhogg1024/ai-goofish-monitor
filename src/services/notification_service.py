@@ -3,12 +3,15 @@
 统一管理所有通知渠道
 """
 import asyncio
-from typing import Dict, List
+import logging
+from typing import Any, Dict, List
 
 from src.infrastructure.external.notification_clients.base import NotificationClient
 from src.infrastructure.external.notification_clients.factory import build_notification_clients
 from src.services.notification_config_service import load_notification_settings
 from src.infrastructure.config.settings import NotificationSettings
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationService:
@@ -21,7 +24,7 @@ class NotificationService:
         self,
         product_data: Dict,
         reason: str,
-    ) -> Dict[str, Dict[str, str | bool]]:
+    ) -> Dict[str, Dict[str, Any]]:
         """
         发送通知到所有启用的渠道
 
@@ -35,10 +38,16 @@ class NotificationService:
             self._send_with_result(client, product_data, reason)
             for client in self.clients
         ]
-        results = await asyncio.gather(*tasks)
-        return {result["channel"]: result for result in results}
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        merged: Dict[str, Dict[str, Any]] = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("通知发送异常: %s", result)
+                continue
+            merged[result["channel"]] = result
+        return merged
 
-    async def send_test_notification(self) -> Dict[str, Dict[str, str | bool]]:
+    async def send_test_notification(self) -> Dict[str, Dict[str, Any]]:
         test_product = {
             "商品标题": "[测试通知] 闲鱼智能监控",
             "当前售价": "0",
@@ -54,9 +63,10 @@ class NotificationService:
         client: NotificationClient,
         product_data: Dict,
         reason: str,
-    ) -> Dict[str, str | bool]:
+    ) -> Dict[str, Any]:
         try:
             await client.send(product_data, reason)
+            logger.info("通知发送成功: %s", client.channel_key)
             return {
                 "channel": client.channel_key,
                 "label": client.display_name,
@@ -64,6 +74,7 @@ class NotificationService:
                 "message": "发送成功",
             }
         except Exception as exc:
+            logger.warning("通知发送失败 [%s]: %s", client.channel_key, exc)
             return {
                 "channel": client.channel_key,
                 "label": client.display_name,

@@ -19,9 +19,15 @@ const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
 
+const MIN_PASSWORD_LENGTH = 4
+
 async function handleLogin() {
   if (!username.value || !password.value) {
     error.value = t('login.errors.missingCredentials')
+    return
+  }
+  if (password.value.length < MIN_PASSWORD_LENGTH) {
+    error.value = t('login.errors.passwordTooShort', { min: MIN_PASSWORD_LENGTH })
     return
   }
 
@@ -31,12 +37,14 @@ async function handleLogin() {
   try {
     const success = await login(username.value, password.value)
     if (success) {
-      const redirectPath = (route.query.redirect as string) || '/'
+      const raw = (route.query.redirect as string) || '/'
+      const redirectPath = raw.startsWith('/') && !raw.startsWith('//') ? raw : '/'
       router.push(redirectPath)
     } else {
       error.value = t('login.errors.invalidCredentials')
     }
   } catch (e) {
+    console.error('[LoginView] login error:', e)
     error.value = t('login.errors.unexpected')
   } finally {
     isLoading.value = false

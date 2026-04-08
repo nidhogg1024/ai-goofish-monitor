@@ -3,11 +3,15 @@
 export interface Task {
   id: number;
   task_name: string;
+  category?: string | null;
+  group_name?: string | null;
   enabled: boolean;
   keyword: string;
+  search_query?: string | null;
   description: string;
   analyze_images: boolean;
   max_pages: number;
+  first_scan_max_pages: number;
   personal_only: boolean;
   min_price: string | null;
   max_price: string | null;
@@ -23,6 +27,8 @@ export interface Task {
   decision_mode: 'ai' | 'keyword';
   keyword_rules: string[];
   is_running: boolean;
+  is_queued?: boolean;
+  execution_state?: 'idle' | 'queued' | 'running';
 }
 
 export type TaskGenerationStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -76,13 +82,17 @@ export interface BatchCreateResult {
 // For task creation
 export interface TaskGenerateRequest {
   task_name?: string | null;
+  category?: string | null;
+  group_name?: string | null;
   keyword?: string | null;
+  search_query?: string | null;
   description?: string;
   analyze_images?: boolean;
   personal_only?: boolean;
   min_price?: string | null;
   max_price?: string | null;
   max_pages?: number;
+  first_scan_max_pages?: number;
   cron?: string | null;
   account_state_file?: string | null;
   account_strategy?: 'auto' | 'fixed' | 'rotate';

@@ -32,7 +32,8 @@ def normalize_cron_expression(value: Optional[str]) -> Optional[str]:
     if not normalized:
         return None
 
-    return CRON_ALIASES.get(normalized.lower(), normalized)
+    lower = normalized.lower()
+    return CRON_ALIASES.get(lower, lower)
 
 
 def build_cron_trigger(
@@ -61,9 +62,11 @@ def build_cron_trigger(
                 timezone=timezone,
             )
     except ValueError as exc:
-        raise ValueError(CRON_FORMAT_HINT) from exc
+        raise ValueError(f"Cron 表达式格式错误: {CRON_FORMAT_HINT}") from exc
 
-    raise ValueError(CRON_FORMAT_HINT)
+    raise ValueError(
+        f"Cron 表达式段数不正确（需要 5 或 6 段，实际 {len(parts)} 段）。{CRON_FORMAT_HINT}"
+    )
 
 
 def validate_cron_expression(value: Optional[str]) -> Optional[str]:

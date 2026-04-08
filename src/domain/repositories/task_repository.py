@@ -4,8 +4,7 @@
 """
 from typing import List, Optional
 from abc import ABC, abstractmethod
-import json
-import aiofiles
+
 from src.domain.models.task import Task
 
 
@@ -20,6 +19,11 @@ class TaskRepository(ABC):
     @abstractmethod
     async def find_by_id(self, task_id: int) -> Optional[Task]:
         """根据ID获取任务"""
+        pass
+
+    @abstractmethod
+    async def find_by_name(self, task_name: str) -> Optional[Task]:
+        """根据名称获取任务"""
         pass
 
     @abstractmethod

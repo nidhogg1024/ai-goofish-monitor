@@ -1,10 +1,9 @@
 """
 Gotify 通知客户端
 """
-import asyncio
-from typing import Dict
+from typing import Dict, Optional
 
-import requests
+import httpx
 
 from .base import NotificationClient
 
@@ -17,8 +16,8 @@ class GotifyClient(NotificationClient):
 
     def __init__(
         self,
-        gotify_url: str | None = None,
-        gotify_token: str | None = None,
+        gotify_url: Optional[str] = None,
+        gotify_token: Optional[str] = None,
         pcurl_to_mobile: bool = True,
     ):
         super().__init__(
@@ -34,14 +33,14 @@ class GotifyClient(NotificationClient):
 
         message = self._build_message(product_data, reason)
         payload = {
-            "title": (None, message.notification_title),
-            "message": (None, message.content),
-            "priority": (None, "5"),
+            "title": message.notification_title,
+            "message": message.content,
+            "priority": 5,
         }
-        final_url = f"{self.gotify_url}/message?token={self.gotify_token}"
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(final_url, files=payload, timeout=10),
-        )
-        response.raise_for_status()
+        final_url = f"{self.gotify_url}/message"
+        headers = {"X-Gotify-Key": self.gotify_token}
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                final_url, json=payload, headers=headers,
+            )
+            response.raise_for_status()

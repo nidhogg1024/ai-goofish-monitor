@@ -1,4 +1,4 @@
-import { computed, ref, watch } from 'vue'
+import { computed, getCurrentInstance, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import * as dashboardApi from '@/api/dashboard'
 import * as resultsApi from '@/api/results'
@@ -48,12 +48,24 @@ function buildSuggestion(
 }
 
 export function useDashboard() {
+  if (!getCurrentInstance()) {
+    throw new Error('useDashboard() must be called inside setup()')
+  }
   const { t } = useI18n()
   const { on } = useWebSocket()
   const snapshot = ref<DashboardSnapshot | null>(null)
   const focusInsights = ref<ResultInsights | null>(null)
   const isLoading = ref(false)
   const error = ref<Error | null>(null)
+
+  let _debouncedTimer: ReturnType<typeof setTimeout> | null = null
+  function debouncedFetchSummary() {
+    if (_debouncedTimer) clearTimeout(_debouncedTimer)
+    _debouncedTimer = setTimeout(() => {
+      _debouncedTimer = null
+      fetchSummary()
+    }, 500)
+  }
 
   async function fetchSummary() {
     isLoading.value = true
@@ -81,6 +93,7 @@ export function useDashboard() {
       aiRecommendedItems: summary?.ai_recommended_items || 0,
       keywordRecommendedItems: summary?.keyword_recommended_items || 0,
       resultFiles: summary?.result_files || 0,
+      lastUpdatedAt: summary?.last_updated_at || null,
     }
   })
 
@@ -112,9 +125,9 @@ export function useDashboard() {
 
   const suggestion = computed(() => buildSuggestion(focusTask.value, t))
 
-  on('tasks_updated', fetchSummary)
-  on('results_updated', fetchSummary)
-  on('task_status_changed', fetchSummary)
+  on('tasks_updated', debouncedFetchSummary)
+  on('results_updated', debouncedFetchSummary)
+  on('task_status_changed', debouncedFetchSummary)
 
   fetchSummary()
 

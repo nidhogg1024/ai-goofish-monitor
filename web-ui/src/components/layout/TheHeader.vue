@@ -59,7 +59,7 @@ function goPrompts() {
     <!-- Search & Navigation -->
     <div class="hidden md:flex flex-grow max-w-md mx-8">
       <DashboardTaskSearch v-if="isDashboard" />
-      <div v-else class="relative w-full group">
+      <div v-else class="relative w-full group" :title="t('header.searchTooltip')">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 transition-colors" />
         <input 
           type="text" 
@@ -67,7 +67,7 @@ function goPrompts() {
           readonly
           aria-disabled="true"
           :placeholder="t('header.searchUnavailable')"
-          class="w-full h-10 pl-10 pr-4 bg-slate-100/50 border border-slate-200/50 rounded-xl text-sm transition-all focus:outline-none focus:ring-2 focus:ring-primary/20 focus:bg-white focus:border-primary/50"
+          class="w-full h-10 pl-10 pr-4 bg-slate-100/50 border border-slate-200/50 rounded-xl text-sm transition-all cursor-not-allowed focus:outline-none"
         />
         <kbd class="absolute right-3 top-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded border border-slate-300 bg-white text-[10px] text-slate-400 font-sans shadow-sm pointer-events-none">
           /
@@ -114,7 +114,7 @@ function goPrompts() {
            <UserCircle class="w-6 h-6 text-slate-500" />
         </div>
         <div class="text-left hidden lg:block">
-           <p class="text-xs font-black text-slate-700 leading-none mb-0.5">Xianyu Admin</p>
+           <p class="text-xs font-black text-slate-700 leading-none mb-0.5">{{ t('header.adminUser') }}</p>
            <p class="text-[10px] text-slate-400 font-medium">{{ t('header.accountManagement') }}</p>
         </div>
       </Button>

@@ -12,12 +12,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+
+logger = logging.getLogger(__name__)
 
 try:
     from zoneinfo import ZoneInfo  # py3.9+
@@ -96,6 +99,8 @@ class _FileLock:
             import fcntl
 
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            logger.warning("fcntl unavailable (Windows?), file locking skipped")
         except Exception:
             pass
         return self
@@ -105,6 +110,8 @@ class _FileLock:
             import fcntl
 
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        except ImportError:
+            pass
         except Exception:
             pass
         return False
@@ -186,12 +193,22 @@ class FailureGuard:
     def _save(self, data: dict) -> None:
         _atomic_write_json(self.path, data)
 
+    def reset_all(self) -> None:
+        self._save({"version": 1, "tasks": {}})
+
     def _update_task(self, task_key: str, updater) -> dict:
         _ensure_parent_dir(self.path)
         with open(self.path, "a+", encoding="utf-8") as fh:
             with _FileLock(fh):
                 fh.seek(0)
-                data = self._load()
+                raw = fh.read()
+                try:
+                    data = json.loads(raw) if raw.strip() else {}
+                except (json.JSONDecodeError, ValueError):
+                    data = {}
+                if "tasks" not in data or not isinstance(data.get("tasks"), dict):
+                    data = {"version": 1, "tasks": {}}
+                data.setdefault("version", 1)
                 tasks = data.setdefault("tasks", {})
                 entry = tasks.get(task_key) or {}
                 if not isinstance(entry, dict):
@@ -328,6 +345,7 @@ class FailureGuard:
 
             consecutive = _as_int(entry.get("consecutive_failures"), 0) + 1
             entry["consecutive_failures"] = consecutive
+            # Truncate failure reason to prevent unbounded growth in the state file
             entry["last_failure_reason"] = (reason or "未知错误")[:1000]
             entry["last_failure_at"] = _dt_to_str(current)
             if cookie_path:

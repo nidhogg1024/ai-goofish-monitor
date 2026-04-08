@@ -11,11 +11,41 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import TaskRegionSelector from '@/components/tasks/TaskRegionSelector.vue'
 
+interface TaskFormState {
+  task_name: string
+  category: string
+  group_name: string
+  keyword: string
+  search_query: string
+  description: string
+  analyze_images: boolean
+  max_pages: number
+  first_scan_max_pages: number
+  personal_only: boolean
+  min_price: string | undefined
+  max_price: string | undefined
+  cron: string
+  account_strategy: 'auto' | 'fixed' | 'rotate'
+  account_state_file: string
+  free_shipping: boolean
+  new_publish_option: string
+  region: string
+  decision_mode: 'ai' | 'keyword'
+  keyword_rules?: string[]
+  enabled?: boolean
+  id?: number
+  is_running?: boolean
+  next_run_at?: string
+  ai_prompt_base_file?: string
+  ai_prompt_criteria_file?: string
+  [key: string]: unknown
+}
+
 type FormMode = 'create' | 'edit'
 type EmittedData = TaskGenerateRequest | Partial<Task>
 const AUTO_ACCOUNT_VALUE = '__auto__'
 const EMPTY_CRON_VALUE = '__manual__'
-const DEFAULT_CRON_VALUE = '*/15 * * * *'
+const DEFAULT_CRON_VALUE = '0 * * * *'
 
 const props = defineProps<{
   mode: FormMode
@@ -30,7 +60,7 @@ const emit = defineEmits<{
 }>()
 const { t } = useI18n()
 
-const form = ref<any>({})
+const form = ref<TaskFormState>({} as TaskFormState)
 const accountStrategy = ref<'auto' | 'fixed' | 'rotate'>('auto')
 const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
@@ -102,8 +132,8 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
   const defaultValues = props.defaultValues || {}
   if (props.mode === 'edit' && props.initialData) {
     form.value = {
-      ...props.initialData,
-      ...defaultValues,
+      ...props.initialData as unknown as TaskFormState,
+      ...defaultValues as unknown as Partial<TaskFormState>,
       account_strategy:
         defaultValues.account_strategy ||
         props.initialData.account_strategy ||
@@ -126,10 +156,14 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
   } else {
     form.value = {
       task_name: '',
+      category: '',
+      group_name: '',
       keyword: '',
+      search_query: '',
       description: '',
       analyze_images: true,
       max_pages: 3,
+      first_scan_max_pages: 10,
       personal_only: true,
       min_price: undefined,
       max_price: undefined,
@@ -140,7 +174,7 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       new_publish_option: '__none__',
       region: '',
       decision_mode: 'ai',
-      ...defaultValues,
+      ...defaultValues as Partial<TaskFormState>,
     }
     if (!form.value.account_strategy) {
       form.value.account_strategy = props.defaultAccount ? 'fixed' : 'auto'
@@ -171,7 +205,7 @@ watch(accountStrategy, (value) => {
     form.value.account_state_file = selectedAccountStateFile.value || props.defaultAccount || AUTO_ACCOUNT_VALUE
     return
   }
-  form.value.account_state_file = null
+  form.value.account_state_file = ''
 })
 
 watch(selectedAccountStateFile, (value) => {
@@ -233,7 +267,7 @@ function handleSubmit() {
   }
 
   // Filter out fields that shouldn't be sent in update requests
-  const { id, is_running, next_run_at, ...submitData } = form.value as any
+  const { id, is_running, next_run_at, ...submitData } = form.value
   const currentAccountStrategy = accountStrategy.value || 'auto'
   if (currentAccountStrategy === 'fixed') {
     const currentAccountStateFile = selectedAccountStateFile.value || AUTO_ACCOUNT_VALUE
@@ -247,7 +281,7 @@ function handleSubmit() {
     }
     submitData.account_state_file = currentAccountStateFile
   } else {
-    submitData.account_state_file = null
+    submitData.account_state_file = ''
   }
 
   if (typeof submitData.region === 'string') {
@@ -267,9 +301,11 @@ function handleSubmit() {
   submitData.decision_mode = decisionMode
   submitData.account_strategy = currentAccountStrategy
   submitData.analyze_images = submitData.analyze_images !== false
+  submitData.category = String(submitData.category || '').trim()
+  submitData.group_name = String(submitData.group_name || '').trim()
   submitData.keyword_rules = decisionMode === 'keyword' ? keywordRules : []
-  submitData.task_name = taskName || null
-  submitData.keyword = keyword || null
+  submitData.task_name = taskName || ''
+  submitData.keyword = keyword || ''
   if (decisionMode === 'keyword' && !submitData.description) {
     submitData.description = ''
   }
@@ -280,7 +316,7 @@ function handleSubmit() {
     submitData.description = description
   }
 
-  emit('submit', submitData)
+  emit('submit', submitData as EmittedData)
 }
 </script>
 
@@ -293,6 +329,28 @@ function handleSubmit() {
       >
         <p class="font-medium">{{ t('tasks.form.quickCreateTitle') }}</p>
         <p class="mt-1 text-blue-800/90">{{ t('tasks.form.quickCreateHint') }}</p>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="task-category" class="sm:text-right">{{ t('tasks.form.category') }}</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="task-category"
+            v-model="form.category"
+            :placeholder="t('tasks.form.categoryPlaceholder')"
+          />
+          <p class="text-xs text-gray-500">{{ t('tasks.form.categoryHint') }}</p>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="task-group" class="sm:text-right">{{ t('tasks.form.group') }}</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="task-group"
+            v-model="form.group_name"
+            :placeholder="t('tasks.form.groupPlaceholder')"
+          />
+          <p class="text-xs text-gray-500">{{ t('tasks.form.groupHint') }}</p>
+        </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="task-name" class="sm:text-right">{{ t('tasks.form.taskName') }}</Label>
@@ -318,6 +376,17 @@ function handleSubmit() {
           <p v-if="allowAiAutofill" class="text-xs text-gray-500">
             {{ t('tasks.form.keywordAutoHint') }}
           </p>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="search-query" class="sm:text-right">{{ t('tasks.form.searchQuery') }}</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="search-query"
+            v-model="form.search_query"
+            :placeholder="t('tasks.form.searchQueryPlaceholder')"
+          />
+          <p class="text-xs text-gray-500">{{ t('tasks.form.searchQueryHint') }}</p>
         </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
@@ -374,14 +443,21 @@ function handleSubmit() {
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.priceRange') }}</Label>
         <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-2 sm:col-span-3">
-          <Input type="number" v-model="form.min_price as any" :aria-label="t('tasks.form.minPrice')" :placeholder="t('tasks.form.minPrice')" />
+          <Input type="number" v-model="form.min_price" :aria-label="t('tasks.form.minPrice')" :placeholder="t('tasks.form.minPrice')" />
           <span>-</span>
-          <Input type="number" v-model="form.max_price as any" :aria-label="t('tasks.form.maxPrice')" :placeholder="t('tasks.form.maxPrice')" />
+          <Input type="number" v-model="form.max_price" :aria-label="t('tasks.form.maxPrice')" :placeholder="t('tasks.form.maxPrice')" />
         </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="max-pages" class="sm:text-right">{{ t('tasks.form.maxPages') }}</Label>
         <Input id="max-pages" v-model.number="form.max_pages" type="number" class="sm:col-span-3" />
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="first-scan-max-pages" class="sm:text-right">{{ t('tasks.form.firstScanMaxPages') }}</Label>
+        <div class="sm:col-span-3">
+          <Input id="first-scan-max-pages" v-model.number="form.first_scan_max_pages" type="number" />
+          <p class="text-muted-foreground mt-1 text-xs">{{ t('tasks.form.firstScanMaxPagesHint') }}</p>
+        </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="cron" class="sm:text-right">{{ t('tasks.form.schedule') }}</Label>
@@ -391,6 +467,9 @@ function handleSubmit() {
               <TabsTrigger value="preset">{{ t('tasks.form.cronPresetTab') }}</TabsTrigger>
               <TabsTrigger value="custom">{{ t('tasks.form.cronCustomTab') }}</TabsTrigger>
             </TabsList>
+            <p class="mt-2 text-xs text-gray-500">
+              {{ t('tasks.form.cronPresetHint') }}
+            </p>
             <TabsContent value="preset">
               <Select v-model="presetCronValue">
                 <SelectTrigger>
@@ -422,6 +501,7 @@ function handleSubmit() {
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.accountStrategyLabel') }}</Label>
         <div class="space-y-2 sm:col-span-3">
+          <!-- Native <select> used intentionally: account strategy needs @change with event.target casting, which aligns better with the imperative handlers (handleAccountStrategyChange / handleAccountStateFileChange) than shadcn Select's v-model pattern. -->
           <select
             :value="accountStrategy"
             class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
@@ -466,7 +546,7 @@ function handleSubmit() {
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.newPublish') }}</Label>
         <div class="sm:col-span-3">
-          <Select v-model="form.new_publish_option as any">
+          <Select v-model="form.new_publish_option">
             <SelectTrigger>
               <SelectValue :placeholder="t('tasks.form.publishOptions.none')" />
             </SelectTrigger>
@@ -484,7 +564,7 @@ function handleSubmit() {
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label class="sm:text-right">{{ t('tasks.form.region') }}</Label>
         <div class="space-y-1 sm:col-span-3">
-          <TaskRegionSelector v-model="form.region as any" />
+          <TaskRegionSelector v-model="form.region" />
           <p class="text-xs text-gray-500">{{ t('tasks.form.regionHint') }}</p>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import importlib
+import logging
 
 
 def _load_scraper(monkeypatch, *, login_is_edge: bool, running_in_docker: bool):
@@ -14,11 +15,12 @@ def _load_scraper(monkeypatch, *, login_is_edge: bool, running_in_docker: bool):
     return reloaded_scraper
 
 
-def test_resolve_browser_channel_uses_chromium_in_docker_even_when_edge_requested(monkeypatch, capsys):
+def test_resolve_browser_channel_uses_chromium_in_docker_even_when_edge_requested(monkeypatch, caplog):
     scraper = _load_scraper(monkeypatch, login_is_edge=True, running_in_docker=True)
 
-    assert scraper._resolve_browser_channel() == "chromium"
-    assert "Docker 镜像未内置 Edge" in capsys.readouterr().out
+    with caplog.at_level(logging.WARNING, logger="src.scraper"):
+        assert scraper._resolve_browser_channel() == "chromium"
+    assert "Docker 镜像未内置 Edge" in caplog.text
 
 
 def test_resolve_browser_channel_uses_msedge_locally_when_requested(monkeypatch):

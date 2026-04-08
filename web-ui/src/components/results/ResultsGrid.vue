@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ResultItem } from '@/types/result.d.ts'
 import { useI18n } from 'vue-i18n'
 import ResultCard from './ResultCard.vue'
@@ -6,11 +7,12 @@ import ResultCard from './ResultCard.vue'
 interface Props {
   results: ResultItem[]
   isLoading: boolean
+  skeletonCount?: number
 }
 
-defineProps<Props>()
+const props = defineProps<Props>()
 const { t } = useI18n()
-const skeletonItems = Array.from({ length: 8 }, (_, index) => index)
+const skeletonItems = computed(() => Array.from({ length: props.skeletonCount ?? 8 }, (_, index) => index))
 </script>
 
 <template>

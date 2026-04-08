@@ -1,8 +1,15 @@
 """
 FastAPI 依赖注入
 提供服务实例的创建和管理
+
+NOTE: Module-level global singletons are set once at startup by app.py.
+This is safe for single-worker deployments (the default). For multi-worker
+setups (e.g. gunicorn with multiple workers), each worker gets its own copy.
+Ensure stateful services (ProcessService, SchedulerService) are designed
+accordingly if scaling to multiple workers.
 """
-from fastapi import Depends
+import logging
+
 from src.services.task_service import TaskService
 from src.services.notification_service import NotificationService, build_notification_service
 from src.services.ai_service import AIAnalysisService
@@ -10,15 +17,45 @@ from src.services.process_service import ProcessService
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
 from src.services.batch_generation_service import BatchGenerationService
+from src.services.execution_queue_service import ExecutionQueueService
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.external.ai_client import AIClient
 
+logger = logging.getLogger(__name__)
 
-# 全局 ProcessService 实例（将在 app.py 中设置）
 _process_service_instance = None
 _scheduler_service_instance = None
 _task_generation_service_instance = None
 _batch_generation_service_instance = None
+_execution_queue_service_instance = None
+
+_task_service_instance: TaskService | None = None
+
+
+class _NullExecutionQueueService:
+    pending_task_ids: set[int] = set()
+    active_task_ids: set[int] = set()
+
+    async def enqueue_task(self, task_id: int, task_name: str, *, source: str = "scheduler") -> bool:
+        return False
+
+    def cancel_task(self, task_id: int) -> bool:
+        return False
+
+    def is_task_pending(self, task_id: int) -> bool:
+        return False
+
+    def is_task_active(self, task_id: int) -> bool:
+        return False
+
+    def snapshot(self) -> dict:
+        return {
+            "worker_count": 0,
+            "queue_size": 0,
+            "active_count": 0,
+            "pending_task_ids": [],
+            "active_task_ids": [],
+        }
 
 
 def set_process_service(service: ProcessService):
@@ -45,11 +82,18 @@ def set_batch_generation_service(service: BatchGenerationService):
     _batch_generation_service_instance = service
 
 
-# 服务依赖注入
+def set_execution_queue_service(service: ExecutionQueueService):
+    """设置全局 ExecutionQueueService 实例"""
+    global _execution_queue_service_instance
+    _execution_queue_service_instance = service
+
+
 def get_task_service() -> TaskService:
-    """获取任务管理服务实例"""
-    repository = SqliteTaskRepository()
-    return TaskService(repository)
+    """获取任务管理服务实例（缓存单例）"""
+    global _task_service_instance
+    if _task_service_instance is None:
+        _task_service_instance = TaskService(SqliteTaskRepository())
+    return _task_service_instance
 
 
 def get_notification_service() -> NotificationService:
@@ -89,3 +133,11 @@ def get_batch_generation_service() -> BatchGenerationService:
     if _batch_generation_service_instance is None:
         raise RuntimeError("BatchGenerationService 未初始化")
     return _batch_generation_service_instance
+
+
+def get_execution_queue_service() -> ExecutionQueueService:
+    """获取执行队列服务实例"""
+    if _execution_queue_service_instance is None:
+        logger.warning("ExecutionQueueService 未初始化，使用空操作替身")
+        return _NullExecutionQueueService()
+    return _execution_queue_service_instance

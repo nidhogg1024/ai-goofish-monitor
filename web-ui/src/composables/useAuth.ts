@@ -1,13 +1,29 @@
-import { ref, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, getCurrentInstance } from 'vue'
+import { useRouter, type Router } from 'vue-router'
 import { wsService } from '@/services/websocket'
+import { setHttpUnauthorizedHandler } from '@/lib/http'
 
-// Global State
 const username = ref<string | null>(localStorage.getItem('auth_username'))
 const isLoggedIn = ref(localStorage.getItem('auth_logged_in') === 'true')
 
+let _router: Router | null = null
+
+export function bindAuthRouter(router: Router) {
+  _router = router
+}
+
+function getRouter(): Router | null {
+  return _router
+}
+
 export function useAuth() {
-  const router = useRouter()
+  if (getCurrentInstance()) {
+    try {
+      _router = useRouter()
+    } catch {
+      // guard against edge cases
+    }
+  }
 
   const isAuthenticated = computed(() => isLoggedIn.value)
 
@@ -18,7 +34,6 @@ export function useAuth() {
     localStorage.setItem('auth_username', user)
     localStorage.setItem('auth_logged_in', 'true')
 
-    // 启动 WebSocket 连接
     wsService.start()
   }
 
@@ -28,10 +43,9 @@ export function useAuth() {
     localStorage.removeItem('auth_username')
     localStorage.removeItem('auth_logged_in')
 
-    // 停止 WebSocket 连接
     wsService.stop()
 
-    // Redirect to login if using router
+    const router = getRouter()
     if (router) {
       router.push('/login')
     } else {
@@ -39,6 +53,7 @@ export function useAuth() {
     }
   }
 
+  // TODO: Passwords are transmitted in plaintext; ensure HTTPS in production.
   async function login(user: string, pass: string): Promise<boolean> {
     try {
       const response = await fetch('/auth/status', {
@@ -61,10 +76,30 @@ export function useAuth() {
     }
   }
 
+  async function validateSession(): Promise<boolean> {
+    if (!isLoggedIn.value) return false
+    try {
+      const response = await fetch('/auth/status', { method: 'GET' })
+      if (!response.ok) {
+        logout()
+        return false
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
   return {
     username,
     isAuthenticated,
     login,
-    logout
+    logout,
+    validateSession,
   }
 }
+
+setHttpUnauthorizedHandler(() => {
+  const { logout } = useAuth()
+  logout()
+})

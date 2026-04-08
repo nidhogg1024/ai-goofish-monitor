@@ -9,18 +9,25 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 
 interface FileOption {
   value: string
   label: string
   taskName?: string
+  category?: string
+  groupName?: string
 }
 
 interface Props {
   files: string[]
   fileOptions?: FileOption[]
+  categoryOptions?: string[]
+  groupOptions?: string[]
+  taskOptions?: FileOption[]
+  selectedCategory: string | null
+  selectedGroup: string | null
+  selectedTaskName: string | null
   selectedFile: string | null
   aiRecommendedOnly: boolean
   keywordRecommendedOnly: boolean
@@ -33,37 +40,45 @@ interface Props {
 const props = defineProps<Props>()
 const { t } = useI18n()
 
-const options = computed(() => {
+const options = computed<FileOption[]>(() => {
   if (!props.isReady) {
     return []
   }
   if (props.fileOptions && props.fileOptions.length > 0) {
     return props.fileOptions
   }
-  return props.files.map((file) => ({ value: file, label: file }))
+  return props.files.map((file) => ({ value: file, label: file, taskName: file }))
 })
 
 const selectedLabel = computed(() => {
   if (!props.isReady) return t('results.filters.loadingTaskNames')
   if (options.value.length === 0) return t('results.filters.noResults')
-  if (!props.selectedFile) return t('results.filters.chooseResult')
-  const match = options.value.find((option) => option.value === props.selectedFile)
+  if (!props.selectedTaskName) return t('results.filters.allTasks')
+  const activeOptions = props.taskOptions && props.taskOptions.length > 0 ? props.taskOptions : options.value
+  const match = activeOptions.find((option) => option.taskName === props.selectedTaskName)
   return match ? match.label : t('results.filters.taskNameLabel', { task: t('common.unnamed') })
 })
 
 const labelClass = computed(() => {
   const classes = ['transition-opacity', 'duration-200']
-  if (!props.isReady || !props.selectedFile || options.value.length === 0) {
+  const activeOptions = props.taskOptions && props.taskOptions.length > 0 ? props.taskOptions : options.value
+  if (!props.isReady || !props.selectedTaskName || activeOptions.length === 0) {
     classes.push('text-muted-foreground')
   }
   classes.push(props.isReady ? 'opacity-100' : 'opacity-70')
   return classes.join(' ')
 })
 
-const isSelectDisabled = computed(() => !props.isReady || options.value.length === 0)
+const isSelectDisabled = computed(() => {
+  const activeOptions = props.taskOptions && props.taskOptions.length > 0 ? props.taskOptions : options.value
+  return !props.isReady || activeOptions.length === 0
+})
 
 const emit = defineEmits<{
   (e: 'update:selectedFile', value: string): void
+  (e: 'update:selectedCategory', value: string | null): void
+  (e: 'update:selectedGroup', value: string | null): void
+  (e: 'update:selectedTaskName', value: string | null): void
   (e: 'update:aiRecommendedOnly', value: boolean): void
   (e: 'update:keywordRecommendedOnly', value: boolean): void
   (e: 'update:sortBy', value: 'crawl_time' | 'publish_time' | 'price' | 'keyword_hit_count'): void
@@ -89,101 +104,113 @@ function handleToggleKeywordRecommended(value: boolean) {
 </script>
 
 <template>
-  <div class="app-surface mb-6 p-4 sm:p-5">
-    <div class="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
-      <div class="space-y-2">
-        <Label class="text-xs font-semibold text-slate-500">{{ t('results.title') }}</Label>
-        <Select
-          :model-value="props.selectedFile || undefined"
-          @update:model-value="(value) => emit('update:selectedFile', value as string)"
-        >
-          <SelectTrigger class="w-full" :disabled="isSelectDisabled">
-            <span :class="labelClass">
-              {{ selectedLabel }}
-            </span>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="option in options" :key="option.value" :value="option.value">
-              {{ option.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+  <div class="app-surface mb-3 px-4 py-3">
+    <div class="flex flex-wrap items-center gap-2">
+      <Select
+        :model-value="props.selectedCategory || '__all__'"
+        @update:model-value="(value) => emit('update:selectedCategory', value === '__all__' ? null : value as string)"
+      >
+        <SelectTrigger class="h-8 w-auto min-w-[100px] max-w-[160px] text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__all__">{{ t('results.filters.allCategories') }}</SelectItem>
+          <SelectItem v-for="category in props.categoryOptions || []" :key="category" :value="category">
+            {{ category }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
 
-      <div class="space-y-2">
-        <Label class="text-xs font-semibold text-slate-500">{{ t('results.filters.sortByCrawlTime') }}</Label>
-        <Select
-          :model-value="props.sortBy"
-          @update:model-value="(value) => emit('update:sortBy', value as any)"
-        >
-          <SelectTrigger class="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="crawl_time">{{ t('results.filters.sortByCrawlTime') }}</SelectItem>
-            <SelectItem value="publish_time">{{ t('results.filters.sortByPublishTime') }}</SelectItem>
-            <SelectItem value="price">{{ t('results.filters.sortByPrice') }}</SelectItem>
-            <SelectItem value="keyword_hit_count">{{ t('results.filters.sortByKeywordHits') }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+      <Select
+        :model-value="props.selectedGroup || '__all__'"
+        @update:model-value="(value) => emit('update:selectedGroup', value === '__all__' ? null : value as string)"
+      >
+        <SelectTrigger class="h-8 w-auto min-w-[100px] max-w-[160px] text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__all__">{{ t('results.filters.allGroups') }}</SelectItem>
+          <SelectItem v-for="group in props.groupOptions || []" :key="group" :value="group">
+            {{ group }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
 
-      <div class="space-y-2">
-        <Label class="text-xs font-semibold text-slate-500">{{ t('results.filters.asc') }} / {{ t('results.filters.desc') }}</Label>
-        <Select
-          :model-value="props.sortOrder"
-          @update:model-value="(value) => emit('update:sortOrder', value as any)"
-        >
-          <SelectTrigger class="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="desc">{{ t('results.filters.desc') }}</SelectItem>
-            <SelectItem value="asc">{{ t('results.filters.asc') }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
+      <Select
+        :model-value="props.selectedTaskName || '__all__'"
+        @update:model-value="(value) => emit('update:selectedTaskName', value === '__all__' ? null : value as string)"
+      >
+        <SelectTrigger class="h-8 w-auto min-w-[100px] max-w-[180px] text-xs" :disabled="isSelectDisabled">
+          <span :class="labelClass">{{ selectedLabel }}</span>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__all__">{{ t('results.filters.allTasks') }}</SelectItem>
+          <SelectItem v-for="option in props.taskOptions || options" :key="option.value" :value="option.taskName || option.value">
+            {{ option.label }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
 
-    <div class="mt-4 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-      <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
-        <div class="flex items-center space-x-2">
-          <Checkbox
-            id="ai-recommended-only"
-            :model-value="props.aiRecommendedOnly"
-            @update:modelValue="(value) => handleToggleAiRecommended(value === true)"
-          />
-          <Label for="ai-recommended-only" class="cursor-pointer">{{ t('results.filters.aiOnly') }}</Label>
-        </div>
+      <div class="mx-1 hidden h-5 w-px bg-slate-200 sm:block" />
 
-        <div class="flex items-center space-x-2">
-          <Checkbox
-            id="keyword-recommended-only"
-            :model-value="props.keywordRecommendedOnly"
-            @update:modelValue="(value) => handleToggleKeywordRecommended(value === true)"
-          />
-          <Label for="keyword-recommended-only" class="cursor-pointer">{{ t('results.filters.keywordOnly') }}</Label>
-        </div>
-      </div>
+      <Select
+        :model-value="props.sortBy"
+        @update:model-value="(value) => emit('update:sortBy', value as any)"
+      >
+        <SelectTrigger class="h-8 w-auto min-w-[90px] max-w-[140px] text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="crawl_time">{{ t('results.filters.sortByCrawlTime') }}</SelectItem>
+          <SelectItem value="publish_time">{{ t('results.filters.sortByPublishTime') }}</SelectItem>
+          <SelectItem value="price">{{ t('results.filters.sortByPrice') }}</SelectItem>
+          <SelectItem value="keyword_hit_count">{{ t('results.filters.sortByKeywordHits') }}</SelectItem>
+        </SelectContent>
+      </Select>
 
-      <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:justify-end">
-        <Button @click="emit('refresh')" :disabled="props.isLoading">
+      <Select
+        :model-value="props.sortOrder"
+        @update:model-value="(value) => emit('update:sortOrder', value as any)"
+      >
+        <SelectTrigger class="h-8 w-auto min-w-[70px] max-w-[100px] text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="desc">{{ t('results.filters.desc') }}</SelectItem>
+          <SelectItem value="asc">{{ t('results.filters.asc') }}</SelectItem>
+        </SelectContent>
+      </Select>
+
+      <div class="mx-1 hidden h-5 w-px bg-slate-200 sm:block" />
+
+      <label class="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+        <Checkbox
+          id="ai-recommended-only"
+          :model-value="props.aiRecommendedOnly"
+          @update:modelValue="(value) => handleToggleAiRecommended(value === true)"
+          class="h-3.5 w-3.5"
+        />
+        {{ t('results.filters.aiOnly') }}
+      </label>
+
+      <label class="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+        <Checkbox
+          id="keyword-recommended-only"
+          :model-value="props.keywordRecommendedOnly"
+          @update:modelValue="(value) => handleToggleKeywordRecommended(value === true)"
+          class="h-3.5 w-3.5"
+        />
+        {{ t('results.filters.keywordOnly') }}
+      </label>
+
+      <div class="ml-auto flex items-center gap-1.5">
+        <Button size="sm" class="h-8 px-3 text-xs" @click="emit('refresh')" :disabled="props.isLoading">
           {{ t('common.refresh') }}
         </Button>
-
-        <Button
-          variant="outline"
-          @click="emit('export')"
-          :disabled="props.isLoading || !props.selectedFile"
-        >
+        <Button size="sm" variant="outline" class="h-8 px-3 text-xs" @click="emit('export')" :disabled="props.isLoading || !props.selectedFile">
           {{ t('results.filters.exportCsv') }}
         </Button>
-
-        <Button
-          variant="destructive"
-          @click="emit('delete')"
-          :disabled="props.isLoading || !props.selectedFile"
-        >
+        <Button size="sm" variant="destructive" class="h-8 px-3 text-xs" @click="emit('delete')" :disabled="props.isLoading || !props.selectedFile">
           {{ t('results.filters.deleteResult') }}
         </Button>
       </div>

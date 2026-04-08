@@ -81,9 +81,17 @@ function validate(): boolean {
     toast({ title: t('tasks.batchCreate.validation.contentRequired'), variant: 'destructive' })
     return false
   }
-  if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
-    toast({ title: t('tasks.batchCreate.validation.urlInvalid'), variant: 'destructive' })
-    return false
+  if (url) {
+    try {
+      const parsed = new URL(url)
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        toast({ title: t('tasks.batchCreate.validation.urlInvalid'), variant: 'destructive' })
+        return false
+      }
+    } catch {
+      toast({ title: t('tasks.batchCreate.validation.urlInvalid'), variant: 'destructive' })
+      return false
+    }
   }
   return true
 }
@@ -162,11 +170,11 @@ async function handleBatchCreate() {
   try {
     const tasksToCreate: TaskGenerateRequest[] = selected.map(({ _selected, _expanded, ...rest }) => ({
       ...rest,
-      task_name: rest.task_name?.trim() || null,
-      keyword: rest.keyword?.trim() || null,
-      min_price: rest.min_price?.trim() || null,
-      max_price: rest.max_price?.trim() || null,
-      description: rest.description?.trim() || '',
+      task_name: (rest.task_name ?? '').trim() || null,
+      keyword: (rest.keyword ?? '').trim() || null,
+      min_price: (rest.min_price ?? '').trim() || null,
+      max_price: (rest.max_price ?? '').trim() || null,
+      description: (rest.description ?? '').trim() || '',
     }))
     const result = await batchCreateTasks(tasksToCreate)
     createResults.value = result.results
@@ -286,7 +294,7 @@ function formatPrice(min: string | null | undefined, max: string | null | undefi
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
                   <span class="text-sm font-semibold text-slate-900 truncate">
-                    {{ preview.task_name || '未命名任务' }}
+                    {{ preview.task_name || t('tasks.batchCreate.unnamedTask') }}
                   </span>
                   <Badge variant="outline" class="shrink-0 text-xs">
                     {{ preview.keyword }}
@@ -380,7 +388,7 @@ function formatPrice(min: string | null | undefined, max: string | null | undefi
               :class="result.success ? 'bg-emerald-500' : 'bg-red-500'"
             />
             <span class="flex-1 truncate" :class="result.success ? 'text-slate-700' : 'text-red-700'">
-              {{ result.success ? (result.task?.task_name || '已创建') : (result.task_name || '未知') }}
+              {{ result.success ? (result.task?.task_name || t('tasks.batchCreate.resultCreated')) : (result.task_name || t('tasks.batchCreate.resultUnknown')) }}
             </span>
             <span v-if="!result.success" class="text-xs text-red-500 truncate max-w-[200px]">
               {{ result.error }}

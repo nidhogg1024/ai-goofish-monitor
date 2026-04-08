@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { LoaderCircle, Search, Sparkles } from 'lucide-vue-next'
@@ -150,21 +150,29 @@ function handlePointerDown(event: MouseEvent) {
   }
 }
 
+let debounceTimer: ReturnType<typeof setTimeout> | null = null
+
 watch(normalizedQuery, () => {
   highlightedIndex.value = 0
   if (!query.value.trim()) return
-  openPanel()
+  if (debounceTimer) clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => openPanel(), 200)
 })
 
 on('tasks_updated', fetchTasks)
 on('task_status_changed', fetchTasks)
 
-onMounted(() => {
-  document.addEventListener('mousedown', handlePointerDown)
+watch(isOpen, (open) => {
+  if (open) {
+    document.addEventListener('mousedown', handlePointerDown)
+  } else {
+    document.removeEventListener('mousedown', handlePointerDown)
+  }
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', handlePointerDown)
+  if (debounceTimer) clearTimeout(debounceTimer)
 })
 </script>
 

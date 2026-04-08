@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
 import { getPromptContent, listPrompts, updatePrompt } from '@/api/prompts'
 import NotificationSettingsPanel from '@/components/settings/NotificationSettingsPanel.vue'
@@ -41,11 +41,10 @@ const {
   testAiConnection
 } = useSettings()
 
-const CUSTOM_MODEL_VALUE = '__custom__'
-
-const activeTab = ref('ai')
+const TAB_KEYS = ['ai', 'rotation', 'notifications', 'status', 'prompts'] as const
+const activeTab = ref<string>(TAB_KEYS[0])
 const route = useRoute()
-const validTabs = new Set(['notifications', 'ai', 'rotation', 'status', 'prompts'])
+const validTabs = new Set<string>(TAB_KEYS)
 
 const promptFiles = ref<string[]>([])
 const selectedPrompt = ref<string | null>(null)
@@ -112,31 +111,16 @@ async function handleTestAi() {
 }
 
 const availableAiModelItems = computed(() => aiModelChecks.value.filter((item) => item.available))
-const unavailableAiModelItems = computed(() => aiModelChecks.value.filter((item) => !item.available))
-const availableAiModels = computed(() => availableAiModelItems.value.map((item) => item.model))
 const unavailableAiModelCount = computed(() => aiModelChecks.value.filter((item) => !item.available).length)
-const displayedAiModels = computed(() => (
-  availableAiModels.value.length > 0 ? availableAiModels.value : aiModelOptions.value
-))
-const currentAiModelProbe = computed(() => {
-  const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
-  if (!currentModel) {
-    return null
-  }
-  return aiModelChecks.value.find((item) => item.model === currentModel) || null
-})
+const availableAiModels = computed(() => availableAiModelItems.value.map((item) => item.model))
+const showUnavailableModels = ref(false)
 
-const selectedAiModelValue = computed(() => {
-  const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
-  if (!currentModel) {
-    return undefined
-  }
-  return displayedAiModels.value.includes(currentModel) ? currentModel : CUSTOM_MODEL_VALUE
-})
-
-const showManualModelInput = computed(() => {
-  const currentModel = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
-  return displayedAiModels.value.length === 0 || !currentModel || !displayedAiModels.value.includes(currentModel)
+const currentModelStatus = computed(() => {
+  const name = (aiSettings.value.OPENAI_MODEL_NAME || '').trim()
+  if (!name || aiModelChecks.value.length === 0) return null
+  const probe = aiModelChecks.value.find((item) => item.model === name)
+  if (!probe) return null
+  return probe.available ? 'available' : 'unavailable'
 })
 
 async function handleRefreshAiModels() {
@@ -153,11 +137,8 @@ async function handleRefreshAiModels() {
   }
 }
 
-function handleAiModelSelect(value: string) {
-  if (value === CUSTOM_MODEL_VALUE) {
-    return
-  }
-  aiSettings.value.OPENAI_MODEL_NAME = value
+function pickModel(model: string) {
+  aiSettings.value.OPENAI_MODEL_NAME = model
 }
 
 async function fetchPrompts() {
@@ -172,7 +153,7 @@ async function fetchPrompts() {
     }
 
     const lastSelected = localStorage.getItem('lastSelectedPrompt')
-    if (lastSelected && files.includes(lastSelected)) {
+    if (typeof lastSelected === 'string' && lastSelected.length > 0 && lastSelected.length < 256 && files.includes(lastSelected)) {
       selectedPrompt.value = lastSelected
       return
     }
@@ -268,8 +249,10 @@ watch(selectedPrompt, async (value) => {
             <div class="grid gap-2">
               <Label>API Key</Label>
               <Input
-                v-model="aiSettings.OPENAI_API_KEY"
+                :model-value="aiSettings.OPENAI_API_KEY"
+                @update:model-value="(v: string | number) => aiSettings.OPENAI_API_KEY = String(v)"
                 type="password"
+                autocomplete="off"
                 :placeholder="t('settings.ai.keyPlaceholder')"
               />
               <p class="text-xs text-gray-500">
@@ -278,102 +261,115 @@ watch(selectedPrompt, async (value) => {
             </div>
             <div class="grid gap-2">
               <Label>{{ t('settings.ai.modelName') }}</Label>
-              <div class="flex flex-col gap-2 md:flex-row md:items-center">
-                <div class="flex-1">
-                  <Select
-                    :model-value="selectedAiModelValue"
-                    @update:model-value="(value) => handleAiModelSelect(value as string)"
-                    :disabled="(isLoadingAiModels || isProbingAiModels) || displayedAiModels.length === 0"
-                  >
-                    <SelectTrigger class="w-full">
-                      <SelectValue :placeholder="t('settings.ai.modelSelectPlaceholder')" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup v-if="availableAiModelItems.length > 0">
-                        <SelectLabel>{{ t('settings.ai.availableModelsGroup') }}</SelectLabel>
-                        <SelectItem
-                          v-for="item in availableAiModelItems"
-                          :key="item.model"
-                          :value="item.model"
-                        >
-                          {{ item.model }}
-                        </SelectItem>
-                      </SelectGroup>
-                      <template v-else>
-                        <SelectItem
-                          v-for="model in displayedAiModels"
-                          :key="model"
-                          :value="model"
-                        >
-                          {{ model }}
-                        </SelectItem>
-                      </template>
-                      <template v-if="unavailableAiModelItems.length > 0">
-                        <SelectSeparator />
-                        <SelectGroup>
-                          <SelectLabel>{{ t('settings.ai.unavailableModelsGroup') }}</SelectLabel>
-                          <SelectItem
-                            v-for="item in unavailableAiModelItems"
-                            :key="item.model"
-                            :value="`unavailable:${item.model}`"
-                            disabled
-                          >
-                            {{ item.model }}
-                          </SelectItem>
-                        </SelectGroup>
-                      </template>
-                      <SelectSeparator />
-                      <SelectItem value="__custom__">
-                        {{ t('settings.ai.manualEntryOption') }}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div class="relative">
+                <Input
+                  v-model="aiSettings.OPENAI_MODEL_NAME"
+                  :placeholder="t('settings.ai.manualModelPlaceholder')"
+                  class="pr-20"
+                  :class="[
+                    currentModelStatus === 'available' && 'border-emerald-300 focus-visible:ring-emerald-200',
+                    currentModelStatus === 'unavailable' && 'border-orange-300 focus-visible:ring-orange-200',
+                  ]"
+                />
+                <span
+                  v-if="currentModelStatus === 'available'"
+                  class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600"
+                >
+                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  {{ t('settings.ai.modelAvailable') }}
+                </span>
+                <span
+                  v-else-if="currentModelStatus === 'unavailable'"
+                  class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 inline-flex items-center gap-1 text-[11px] font-medium text-orange-500"
+                >
+                  <span class="h-1.5 w-1.5 rounded-full bg-orange-400" />
+                  {{ t('settings.ai.modelUnavailable') }}
+                </span>
+              </div>
+
+              <!-- Model tags -->
+              <div
+                v-if="availableAiModelItems.length > 0 || (aiModelOptions.length > 0 && aiModelChecks.length === 0)"
+                class="flex flex-wrap items-center gap-1.5"
+              >
+                <template v-if="availableAiModelItems.length > 0">
+                  <button
+                    v-for="item in availableAiModelItems"
+                    :key="item.model"
+                    type="button"
+                    class="inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium transition-all duration-150 cursor-pointer"
+                    :class="aiSettings.OPENAI_MODEL_NAME === item.model
+                      ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 hover:border-slate-300'"
+                    @click="pickModel(item.model)"
+                  >{{ item.model }}</button>
+                </template>
+                <template v-else>
+                  <button
+                    v-for="model in aiModelOptions"
+                    :key="model"
+                    type="button"
+                    class="inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium transition-all duration-150 cursor-pointer"
+                    :class="aiSettings.OPENAI_MODEL_NAME === model
+                      ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 hover:border-slate-300'"
+                    @click="pickModel(model)"
+                  >{{ model }}</button>
+                </template>
+              </div>
+
+              <!-- Summary row: probe stats + refresh button -->
+              <div class="flex items-center justify-between gap-3">
+                <p class="text-xs text-slate-400 leading-relaxed">
+                  <template v-if="aiModelChecks.length">
+                    {{
+                      t('settings.ai.probeSummary', {
+                        available: availableAiModels.length,
+                        total: aiModelChecks.length,
+                      })
+                    }}
+                    <button
+                      v-if="unavailableAiModelCount > 0"
+                      type="button"
+                      class="text-slate-400 hover:text-slate-600 transition-colors"
+                      @click="showUnavailableModels = !showUnavailableModels"
+                    >
+                      · {{ t('settings.ai.unavailableSummary', { count: unavailableAiModelCount }) }}
+                    </button>
+                  </template>
+                  <template v-else>
+                    {{
+                      aiModelListSource
+                        ? t('settings.ai.modelSource', { source: aiModelListSource })
+                        : t('settings.ai.modelListHint')
+                    }}
+                  </template>
+                </p>
                 <Button
-                  variant="outline"
+                  variant="ghost"
+                  size="sm"
                   type="button"
                   @click="handleRefreshAiModels"
                   :disabled="isLoadingAiModels || isProbingAiModels || isSaving"
+                  class="shrink-0 text-xs text-slate-500 hover:text-primary"
                 >
                   {{ (isLoadingAiModels || isProbingAiModels) ? t('settings.ai.loadingModels') : t('settings.ai.refreshModels') }}
                 </Button>
               </div>
-              <p class="text-xs text-gray-500">
-                {{
-                  aiModelListSource
-                    ? t('settings.ai.modelSource', { source: aiModelListSource })
-                    : t('settings.ai.modelListHint')
-                }}
-              </p>
-              <p v-if="aiModelChecks.length" class="text-xs text-gray-500">
-                {{
-                  t('settings.ai.probeSummary', {
-                    available: availableAiModels.length,
-                    total: aiModelChecks.length,
-                  })
-                }}
-                <span v-if="unavailableAiModelCount > 0">
-                  · {{ t('settings.ai.unavailableSummary', { count: unavailableAiModelCount }) }}
-                </span>
-              </p>
-              <div v-if="showManualModelInput" class="grid gap-2">
-                <Label>{{ t('settings.ai.manualModelName') }}</Label>
-                <Input
-                  v-model="aiSettings.OPENAI_MODEL_NAME"
-                  :placeholder="t('settings.ai.manualModelPlaceholder')"
-                />
-                <p
-                  v-if="currentAiModelProbe && !currentAiModelProbe.available"
-                  class="text-xs text-amber-600"
-                >
-                  {{
-                    t('settings.ai.currentModelUnavailable', {
-                      model: currentAiModelProbe.model,
-                      reason: currentAiModelProbe.message,
-                    })
-                  }}
-                </p>
+
+              <!-- Unavailable models (collapsed by default) -->
+              <div v-if="showUnavailableModels && unavailableAiModelCount > 0" class="flex flex-wrap gap-1.5">
+                <span
+                  v-for="item in aiModelChecks.filter(i => !i.available)"
+                  :key="item.model"
+                  class="inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium text-slate-400 border-slate-200 bg-slate-50/60 line-through cursor-default"
+                  :title="item.message"
+                >{{ item.model }}</span>
               </div>
+
+              <p v-if="aiModelChecks.length && aiModelListSource" class="text-xs text-slate-400">
+                {{ t('settings.ai.modelSource', { source: aiModelListSource }) }}
+              </p>
             </div>
             <div class="grid gap-2">
               <Label>{{ t('settings.ai.proxy') }}</Label>

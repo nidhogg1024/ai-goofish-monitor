@@ -15,6 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { ChevronDown, ChevronUp } from 'lucide-vue-next'
 
 const { t } = useI18n()
 
@@ -23,6 +24,7 @@ const {
   selectedFile,
   results,
   insights,
+  totalItems,
   filters,
   isLoading,
   error,
@@ -30,12 +32,20 @@ const {
   exportSelectedResults,
   deleteSelectedFile,
   fileOptions,
+  categoryOptions,
+  groupOptions,
+  taskOptions,
+  selectedCategory,
+  selectedGroup,
+  selectedTaskName,
   isFileOptionsReady,
 } = useResults()
 
 const isDeleteDialogOpen = ref(false)
+const insightsExpanded = ref(false)
 
 const selectedTaskLabel = computed(() => {
+  if (selectedTaskName.value) return selectedTaskName.value
   if (!selectedFile.value || fileOptions.value.length === 0) return null
   const match = fileOptions.value.find((option) => option.value === selectedFile.value)
   if (!match) return null
@@ -75,6 +85,7 @@ async function handleDeleteResults() {
   try {
     await deleteSelectedFile(selectedFile.value)
     toast({ title: t('results.filters.resultDeleted') })
+    refreshResults()
   } catch (e) {
     toast({
       title: t('results.filters.deleteFailed'),
@@ -89,11 +100,24 @@ async function handleDeleteResults() {
 
 <template>
   <div>
-    <h1 class="text-2xl font-bold text-gray-800 mb-6">
-      {{ t('results.title') }}
-    </h1>
+    <div class="mb-3 flex items-center justify-between">
+      <h1 class="text-lg font-bold text-gray-800">
+        {{ t('results.title') }}
+        <span v-if="totalItems > 0" class="ml-2 text-sm font-normal text-slate-400">
+          {{ t('results.totalItems', { count: totalItems }) }}
+        </span>
+      </h1>
+      <button
+        type="button"
+        class="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
+        @click="insightsExpanded = !insightsExpanded"
+      >
+        {{ t('results.priceInsights') }}
+        <component :is="insightsExpanded ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
+      </button>
+    </div>
 
-    <div v-if="error" class="app-alert-error mb-4" role="alert">
+    <div v-if="error" class="app-alert-error mb-3" role="alert">
       <strong class="font-bold">{{ t('common.error') }}</strong>
       <span class="block sm:inline">{{ error.message }}</span>
     </div>
@@ -101,6 +125,12 @@ async function handleDeleteResults() {
     <ResultsFilterBar
       :files="files"
       :file-options="fileOptions"
+      :category-options="categoryOptions"
+      :group-options="groupOptions"
+      :task-options="taskOptions"
+      v-model:selectedCategory="selectedCategory"
+      v-model:selectedGroup="selectedGroup"
+      v-model:selectedTaskName="selectedTaskName"
       :is-ready="isFileOptionsReady"
       v-model:selectedFile="selectedFile"
       v-model:aiRecommendedOnly="filters.ai_recommended_only"
@@ -113,7 +143,16 @@ async function handleDeleteResults() {
       @delete="openDeleteDialog"
     />
 
-    <ResultsInsightsPanel :insights="insights" :selected-task-label="selectedTaskLabel" />
+    <Transition
+      enter-active-class="transition-all duration-300 ease-out"
+      enter-from-class="opacity-0 max-h-0 overflow-hidden"
+      enter-to-class="opacity-100 max-h-[800px]"
+      leave-active-class="transition-all duration-200 ease-in"
+      leave-from-class="opacity-100 max-h-[800px]"
+      leave-to-class="opacity-0 max-h-0 overflow-hidden"
+    >
+      <ResultsInsightsPanel v-if="insightsExpanded" :insights="insights" :selected-task-label="selectedTaskLabel" />
+    </Transition>
 
     <ResultsGrid :results="results" :is-loading="isLoading" />
 

@@ -2,17 +2,30 @@
 任务领域模型
 定义任务实体及其业务逻辑
 """
+import logging
 import re
 from enum import Enum
-from typing import Any, List, Literal, Optional
+from typing import Any, Callable, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core.cron_utils import validate_cron_expression
-from src.services.account_strategy_service import (
-    clean_account_state_file,
-    normalize_account_strategy,
-)
+
+logger = logging.getLogger(__name__)
+
+
+def _get_account_helpers() -> Tuple[Callable, Callable]:
+    """Lazy import to avoid domain → service circular dependency."""
+    from src.services.account_strategy_service import (
+        clean_account_state_file,
+        normalize_account_strategy,
+    )
+    return clean_account_state_file, normalize_account_strategy
+
+
+def _get_ensure_task_taxonomy() -> Callable:
+    from src.services.task_taxonomy_service import ensure_task_taxonomy
+    return ensure_task_taxonomy
 
 
 class TaskStatus(str, Enum):
@@ -67,6 +80,7 @@ def _extract_keywords_from_legacy_groups(groups) -> List[str]:
 def _normalize_payload_keywords(payload: Any) -> Any:
     if payload is None or not isinstance(payload, dict):
         return payload
+    clean_account_state_file, normalize_account_strategy = _get_account_helpers()
     values = dict(payload)
     values["account_state_file"] = clean_account_state_file(values.get("account_state_file"))
     values["account_strategy"] = normalize_account_strategy(
@@ -96,12 +110,38 @@ def _validate_cron_expression(value: Optional[str]) -> Optional[str]:
     return validate_cron_expression(value)
 
 
+def _clean_account_state_file(value: Any) -> Any:
+    clean_fn, _ = _get_account_helpers()
+    return clean_fn(value)
+
+
+def _apply_taxonomy(self_obj: Any) -> None:
+    ensure_taxonomy = _get_ensure_task_taxonomy()
+    self_obj.category, self_obj.group_name = ensure_taxonomy(
+        category=self_obj.category,
+        group_name=self_obj.group_name,
+        task_name=self_obj.task_name,
+        keyword=self_obj.keyword,
+        description=self_obj.description,
+    )
+
+
 def _normalize_price_value(value):
     if _normalize_optional_string(value) is None:
         return None
     if isinstance(value, (int, float)):
         return str(value)
     return value
+
+
+def _log_extra_fields(cls: type, values: Any) -> Any:
+    """Log unknown fields that will be silently dropped by extra='ignore'."""
+    if isinstance(values, dict):
+        known = set(cls.model_fields)
+        extra_keys = set(values) - known
+        if extra_keys:
+            logger.debug("模型 %s 忽略了未知字段: %s", cls.__name__, extra_keys)
+    return values
 
 
 class Task(BaseModel):
@@ -111,11 +151,15 @@ class Task(BaseModel):
 
     id: Optional[int] = None
     task_name: str
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     enabled: bool
     keyword: str
+    search_query: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     max_pages: int
+    first_scan_max_pages: int = 10
     personal_only: bool
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -134,6 +178,7 @@ class Task(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_legacy_keyword_payload(cls, values):
+        _log_extra_fields(cls, values)
         return _normalize_payload_keywords(values)
 
     @field_validator("keyword_rules", mode="before")
@@ -161,11 +206,15 @@ class TaskCreate(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_name: str
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     enabled: bool = True
     keyword: str
+    search_query: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     max_pages: int = 3
+    first_scan_max_pages: int = 10
     personal_only: bool = True
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -195,10 +244,15 @@ class TaskCreate(BaseModel):
     def normalize_cron(cls, value):
         return _normalize_optional_string(value)
 
+    @field_validator("category", "group_name", mode="before")
+    @classmethod
+    def normalize_taxonomy_fields(cls, value):
+        return _normalize_optional_string(value)
+
     @field_validator("account_state_file", mode="before")
     @classmethod
     def normalize_account_state_file(cls, value):
-        return clean_account_state_file(value)
+        return _clean_account_state_file(value)
 
     @field_validator("cron")
     @classmethod
@@ -219,6 +273,7 @@ class TaskCreate(BaseModel):
             raise ValueError("关键词判断模式下，至少需要一个关键词。")
         if self.account_strategy == "fixed" and not self.account_state_file:
             raise ValueError("固定账号模式下必须选择账号。")
+        _apply_taxonomy(self)
         return self
 
 
@@ -228,11 +283,15 @@ class TaskUpdate(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_name: Optional[str] = None
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     enabled: Optional[bool] = None
     keyword: Optional[str] = None
+    search_query: Optional[str] = None
     description: Optional[str] = None
     analyze_images: Optional[bool] = None
     max_pages: Optional[int] = None
+    first_scan_max_pages: Optional[int] = None
     personal_only: Optional[bool] = None
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -263,10 +322,15 @@ class TaskUpdate(BaseModel):
     def normalize_cron(cls, value):
         return _normalize_optional_string(value)
 
+    @field_validator("category", "group_name", mode="before")
+    @classmethod
+    def normalize_taxonomy_fields(cls, value):
+        return _normalize_optional_string(value)
+
     @field_validator("account_state_file", mode="before")
     @classmethod
     def normalize_account_state_file(cls, value):
-        return clean_account_state_file(value)
+        return _clean_account_state_file(value)
 
     @field_validator("cron")
     @classmethod
@@ -286,6 +350,9 @@ class TaskUpdate(BaseModel):
         if self.decision_mode == "ai" and self.description is not None:
             if not str(self.description).strip():
                 raise ValueError("AI 判断模式下，详细需求(description)不能为空。")
+        if self.account_strategy == "fixed" and self.account_state_file is not None:
+            if not self.account_state_file:
+                raise ValueError("固定账号模式下必须选择账号。")
         return self
 
 
@@ -295,13 +362,17 @@ class TaskGenerateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_name: Optional[str] = None
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     keyword: Optional[str] = None
+    search_query: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     personal_only: bool = True
     min_price: Optional[str] = None
     max_price: Optional[str] = None
     max_pages: int = 3
+    first_scan_max_pages: int = 10
     cron: Optional[str] = None
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
@@ -324,6 +395,11 @@ class TaskGenerateRequest(BaseModel):
     @field_validator("cron", mode="before")
     @classmethod
     def empty_str_to_none(cls, value):
+        return _normalize_optional_string(value)
+
+    @field_validator("category", "group_name", mode="before")
+    @classmethod
+    def normalize_taxonomy_fields(cls, value):
         return _normalize_optional_string(value)
 
     @field_validator("cron")
@@ -359,4 +435,5 @@ class TaskGenerateRequest(BaseModel):
                 raise ValueError("关键词判断模式下，至少需要一个关键词。")
         if self.account_strategy == "fixed" and not self.account_state_file:
             raise ValueError("固定账号模式下必须选择账号。")
+        _apply_taxonomy(self)
         return self

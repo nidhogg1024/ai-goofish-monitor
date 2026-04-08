@@ -7,11 +7,16 @@ URL 内容抓取服务
 from __future__ import annotations
 
 import json
+import logging
 import re
 from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
+
+_ALLOWED_SCHEMES = {"http", "https"}
 
 
 _TIMEOUT = 20.0
@@ -34,8 +39,21 @@ _STRIP_TAGS = {"script", "style", "nav", "header", "footer", "aside", "iframe", 
 #  主入口
 # ---------------------------------------------------------------------------
 
+def _validate_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(f"不支持的 URL scheme: {parsed.scheme}")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise ValueError("URL 缺少主机名")
+    _PRIVATE_PATTERNS = ("localhost", "127.", "10.", "192.168.", "172.16.", "169.254.", "0.0.0.0", "[::1]")
+    if any(hostname.startswith(p) or hostname == p.rstrip(".") for p in _PRIVATE_PATTERNS):
+        raise ValueError("不允许访问内部网络地址")
+
+
 async def fetch_url_content(url: str) -> str:
     """抓取 URL，返回正文 + 评论的完整文本。"""
+    _validate_url(url)
     async with httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=True,
@@ -113,12 +131,10 @@ async def _fetch_bilibili_comments(html: str) -> str:
     bili_headers = {**_HEADERS, "Referer": "https://www.bilibili.com"}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers=bili_headers) as client:
-        # 获取热门主评论（nohot=0 避免未登录 -400 错误）
-        api_url = (
-            f"https://api.bilibili.com/x/v2/reply"
-            f"?type={comment_type}&oid={oid}&sort=1&ps=20&nohot=0"
+        resp = await client.get(
+            "https://api.bilibili.com/x/v2/reply",
+            params={"type": comment_type, "oid": oid, "sort": 1, "ps": 20, "nohot": 0},
         )
-        resp = await client.get(api_url)
         data = resp.json()
 
         if data.get("code") != 0:
@@ -143,12 +159,11 @@ async def _fetch_bilibili_comments(html: str) -> str:
             rcount = reply.get("rcount", 0)
             rpid = reply.get("rpid")
             if rcount > 0 and rpid:
-                sub_url = (
-                    f"https://api.bilibili.com/x/v2/reply/reply"
-                    f"?oid={oid}&type={comment_type}&root={rpid}&ps=10&pn=1"
-                )
                 try:
-                    sub_resp = await client.get(sub_url)
+                    sub_resp = await client.get(
+                        "https://api.bilibili.com/x/v2/reply/reply",
+                        params={"oid": oid, "type": comment_type, "root": rpid, "ps": 10, "pn": 1},
+                    )
                     sub_data = sub_resp.json()
                     sub_replies = sub_data.get("data", {}).get("replies") or []
                     for sub in sub_replies:
@@ -157,8 +172,8 @@ async def _fetch_bilibili_comments(html: str) -> str:
                         sub_likes = sub.get("like", 0)
                         if sub_msg:
                             lines.append(f"  └ [{sub_likes}赞] {sub_uname}: {sub_msg}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("获取 B 站子评论失败 (rpid=%s): %s", rpid, exc)
 
     result = "\n".join(lines)
     if len(result) > _MAX_COMMENT_LENGTH:
@@ -178,6 +193,9 @@ def _clean_bilibili_text(text: str) -> str:
 #  Playwright fallback
 # ---------------------------------------------------------------------------
 
+_PLAYWRIGHT_TOTAL_TIMEOUT = 30.0
+
+
 async def _playwright_fetch_comments(url: str) -> str:
     """使用 Playwright 渲染页面并滚动加载评论区。"""
     try:
@@ -188,7 +206,9 @@ async def _playwright_fetch_comments(url: str) -> str:
     try:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
-            page = await browser.new_page()
+            context = await browser.new_context()
+            context.set_default_timeout(_PLAYWRIGHT_TOTAL_TIMEOUT * 1000)
+            page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
             # 滚动几次以触发评论懒加载
@@ -224,7 +244,8 @@ async def _playwright_fetch_comments(url: str) -> str:
                 result = result[:_MAX_COMMENT_LENGTH] + "\n...(评论已截断)"
             return result
 
-    except Exception:
+    except Exception as exc:
+        logger.warning("Playwright 评论抓取失败 (%s): %s", url, exc)
         return ""
 
 

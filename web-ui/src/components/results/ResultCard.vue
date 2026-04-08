@@ -20,23 +20,34 @@ interface Props {
 const props = defineProps<Props>()
 const { t } = useI18n()
 
-const info = props.item.商品信息
-const seller = props.item.卖家信息
-const ai = props.item.ai_analysis
-const priceInsight = props.item.price_insight
+const info = computed(() => props.item.商品信息)
+const seller = computed(() => props.item.卖家信息)
+const ai = computed(() => props.item.ai_analysis)
+const priceInsight = computed(() => props.item.price_insight)
 
-const isRecommended = ai?.is_recommended === true
+const isRecommended = computed(() => ai.value?.is_recommended === true)
 const recommendationStatus = computed(() => {
-  if (ai?.is_recommended === true) return { label: t('results.card.strongRecommend'), color: 'bg-emerald-500', icon: CheckCircle2, text: 'text-emerald-600', bg: 'bg-emerald-50' }
-  if (ai?.is_recommended === false) return { label: t('results.card.notRecommended'), color: 'bg-rose-500', icon: XCircle, text: 'text-rose-600', bg: 'bg-rose-50' }
+  if (ai.value?.is_recommended === true) return { label: t('results.card.strongRecommend'), color: 'bg-emerald-500', icon: CheckCircle2, text: 'text-emerald-600', bg: 'bg-emerald-50' }
+  if (ai.value?.is_recommended === false) return { label: t('results.card.notRecommended'), color: 'bg-rose-500', icon: XCircle, text: 'text-rose-600', bg: 'bg-rose-50' }
   return { label: t('results.card.pending'), color: 'bg-amber-500', icon: AlertCircle, text: 'text-amber-600', bg: 'bg-amber-50' }
 })
 
-const imageUrl = info.商品图片列表?.[0] || info.商品主图链接 || ''
-const crawlTime = props.item.爬取时间
-  ? formatDateTime(props.item.爬取时间, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-  : t('common.unknown')
-const matchScore = ai?.value_score ?? 0
+const imageUrl = computed(() => info.value.商品图片列表?.[0] || info.value.商品主图链接 || '')
+const crawlTime = computed(() => {
+  if (!props.item.爬取时间) return t('common.unknown')
+  try {
+    const formatted = formatDateTime(props.item.爬取时间, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    return formatted && !String(formatted).includes('Invalid') ? formatted : t('common.unknown')
+  } catch {
+    return t('common.unknown')
+  }
+})
+const matchScore = computed(() => ai.value?.value_score ?? 0)
+
+function handleImageError(event: Event) {
+  const img = event.target as HTMLImageElement
+  img.src = '/placeholder.png'
+}
 
 const expanded = ref(false)
 </script>
@@ -52,6 +63,7 @@ const expanded = ref(false)
         :alt="info.商品标题"
         class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
         loading="lazy"
+        @error="handleImageError"
       />
       <!-- Overlays -->
       <div class="absolute top-3 left-3 flex gap-2">

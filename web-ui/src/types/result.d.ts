@@ -1,4 +1,8 @@
 // Based on the data structure from web_server.py and scraper.py
+//
+// TODO: Chinese field names (商品标题, 当前售价, etc.) make IDE autocomplete less ergonomic
+// for non-Chinese-speaking contributors. Consider adding English alias interfaces or a
+// mapping layer (e.g. `title` → `商品标题`) to improve DX while keeping backend compatibility.
 
 export interface ProductInfo {
   "商品标题": string;

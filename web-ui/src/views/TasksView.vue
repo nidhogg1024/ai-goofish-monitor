@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useTasks } from '@/composables/useTasks'
 import type { Task, TaskUpdate } from '@/types/task.d.ts'
@@ -10,7 +10,10 @@ import BatchCreateDialog from '@/components/tasks/BatchCreateDialog.vue'
 import TasksTable from '@/components/tasks/TasksTable.vue'
 import TaskForm from '@/components/tasks/TaskForm.vue'
 import { listAccounts, type AccountItem } from '@/api/accounts'
+import { normalizeTasks } from '@/lib/normalizeTask'
+import { canStartTask } from '@/lib/taskSchedule'
 import { Button } from '@/components/ui/button'
+import Badge from '@/components/ui/badge/Badge.vue'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
 import {
@@ -22,6 +25,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 const { t } = useI18n()
+const router = useRouter()
 
 const {
   tasks,
@@ -53,6 +57,94 @@ const taskToDelete = computed(() => {
   return tasks.value.find((task) => task.id === taskToDeleteId.value) || null
 })
 const editDefaults = computed(() => parseTaskFormDefaults(route.query))
+const routeCategory = computed(() => typeof route.query.category === 'string' ? route.query.category : null)
+const routeGroup = computed(() => typeof route.query.group === 'string' ? route.query.group : null)
+const routeTaskName = computed(() => typeof route.query.task === 'string' ? route.query.task : null)
+const normalizedTasks = computed(() => normalizeTasks(tasks.value))
+const groupedTaskCategories = computed(() => {
+  const categoryMap = new Map<string, {
+    name: string
+    groups: Array<{
+      name: string
+      tasks: Task[]
+      runningCount: number
+      enabledCount: number
+      budgetMin: number | null
+      budgetMax: number | null
+    }>
+    totalTasks: number
+    runningCount: number
+  }>()
+
+  for (const task of normalizedTasks.value) {
+    const categoryName = task.category || t('tasks.defaults.uncategorized')
+    const groupName = task.group_name || t('tasks.defaults.defaultGroup')
+    if (!categoryMap.has(categoryName)) {
+      categoryMap.set(categoryName, {
+        name: categoryName,
+        groups: [],
+        totalTasks: 0,
+        runningCount: 0,
+      })
+    }
+    const category = categoryMap.get(categoryName)!
+    let group = category.groups.find((item) => item.name === groupName)
+    if (!group) {
+      group = {
+        name: groupName,
+        tasks: [],
+        runningCount: 0,
+        enabledCount: 0,
+        budgetMin: null,
+        budgetMax: null,
+      }
+      category.groups.push(group)
+    }
+    group.tasks.push(task)
+    category.totalTasks += 1
+    if (task.is_running) {
+      group.runningCount += 1
+      category.runningCount += 1
+    }
+    if (task.enabled) {
+      group.enabledCount += 1
+    }
+    const minPrice = Number(task.min_price)
+    const maxPrice = Number(task.max_price)
+    if (!Number.isNaN(minPrice)) {
+      group.budgetMin = group.budgetMin === null ? minPrice : Math.min(group.budgetMin, minPrice)
+    }
+    if (!Number.isNaN(maxPrice)) {
+      group.budgetMax = group.budgetMax === null ? maxPrice : Math.max(group.budgetMax, maxPrice)
+    }
+  }
+
+  return Array.from(categoryMap.values()).map((category) => ({
+    ...category,
+    groups: category.groups.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
+  }))
+})
+const visibleGroupedTaskCategories = computed(() =>
+  groupedTaskCategories.value
+    .filter((category) => !routeCategory.value || category.name === routeCategory.value)
+    .map((category) => ({
+      ...category,
+      groups: category.groups.filter((group) => !routeGroup.value || group.name === routeGroup.value),
+    }))
+    .filter((category) => category.groups.length > 0)
+)
+const groupedStats = computed(() => ({
+  categoryCount: visibleGroupedTaskCategories.value.length,
+  groupCount: visibleGroupedTaskCategories.value.reduce((sum, category) => sum + category.groups.length, 0),
+  taskCount: visibleGroupedTaskCategories.value.reduce(
+    (sum, category) => sum + category.groups.reduce((groupSum, group) => groupSum + group.tasks.length, 0),
+    0,
+  ),
+  runningCount: visibleGroupedTaskCategories.value.reduce(
+    (sum, category) => sum + category.groups.reduce((groupSum, group) => groupSum + group.runningCount, 0),
+    0,
+  ),
+}))
 
 function handleDeleteTask(taskId: number) {
   taskToDeleteId.value = taskId
@@ -152,15 +244,15 @@ async function handleRefreshCriteria() {
 const isStartingAll = ref(false)
 
 const startableTaskCount = computed(() =>
-  tasks.value.filter((t) => t.enabled && !t.is_running).length,
+  tasks.value.filter((task) => canStartTask(task)).length,
 )
 
 async function handleStartAll() {
-  const toStart = tasks.value.filter((t) => t.enabled && !t.is_running)
+  const toStart = tasks.value.filter((task) => canStartTask(task))
   if (!toStart.length) return
   isStartingAll.value = true
   try {
-    await Promise.allSettled(toStart.map((t) => startTask(t.id)))
+    await Promise.allSettled(toStart.map((task) => startTask(task.id)))
   } finally {
     isStartingAll.value = false
   }
@@ -190,19 +282,68 @@ async function handleStopTask(taskId: number) {
   }
 }
 
+const _toggleTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
 async function handleToggleEnabled(task: Task, enabled: boolean) {
   const previous = task.enabled
   task.enabled = enabled
-  try {
-    await updateTask(task.id, { enabled })
-  } catch (e) {
-    task.enabled = previous
-    toast({
-      title: t('tasks.toasts.toggleFailed'),
-      description: (e as Error).message,
-      variant: 'destructive',
-    })
-  }
+
+  const existingTimer = _toggleTimers.get(task.id)
+  if (existingTimer) clearTimeout(existingTimer)
+
+  _toggleTimers.set(task.id, setTimeout(async () => {
+    _toggleTimers.delete(task.id)
+    try {
+      await updateTask(task.id, { enabled })
+    } catch (e) {
+      task.enabled = previous
+      toast({
+        title: t('tasks.toasts.toggleFailed'),
+        description: (e as Error).message,
+        variant: 'destructive',
+      })
+    }
+  }, 300))
+}
+
+function openTaskResults(task: Task) {
+  router.push({
+    name: 'Results',
+    query: {
+      category: task.category || undefined,
+      group: task.group_name || undefined,
+      task: task.task_name,
+    },
+  })
+}
+
+function openTaskLogs(task: Task) {
+  router.push({
+    name: 'Logs',
+    query: {
+      category: task.category || undefined,
+      group: task.group_name || undefined,
+      taskId: String(task.id),
+    },
+  })
+}
+
+function openGroupResults(category: string, group: string) {
+  router.push({
+    name: 'Results',
+    query: { category, group },
+  })
+}
+
+function openGroupLogs(category: string, group: string, firstTaskId?: number) {
+  router.push({
+    name: 'Logs',
+    query: {
+      category,
+      group,
+      taskId: firstTaskId !== undefined ? String(firstTaskId) : undefined,
+    },
+  })
 }
 
 async function fetchAccountOptions() {
@@ -218,14 +359,23 @@ async function fetchAccountOptions() {
 }
 
 onMounted(fetchAccountOptions)
+
+function clearTaskScope() {
+  router.push({ name: 'Tasks' })
+}
 </script>
 
 <template>
   <div>
     <div class="flex justify-between items-center mb-6">
-      <h1 class="text-2xl font-bold text-gray-800">
-        {{ t('tasks.title') }}
-      </h1>
+      <div>
+        <h1 class="text-2xl font-bold text-gray-800">
+          {{ t('tasks.title') }}
+        </h1>
+        <p class="mt-1 text-sm text-slate-500">
+          {{ t('tasks.viewDescription') }}
+        </p>
+      </div>
       <div class="flex gap-2">
         <Button
           v-if="startableTaskCount > 0"
@@ -295,17 +445,114 @@ onMounted(fetchAccountOptions)
       <span class="block sm:inline">{{ error.message }}</span>
     </div>
 
-    <TasksTable
-      :tasks="tasks"
-      :is-loading="isLoading"
-      :stopping-ids="stoppingTaskIds"
-      @delete-task="handleDeleteTask"
-      @edit-task="handleEditTask"
-      @run-task="handleStartTask"
-      @stop-task="handleStopTask"
-      @refresh-criteria="handleOpenCriteriaDialog"
-      @toggle-enabled="handleToggleEnabled"
-    />
+    <div
+      v-if="routeCategory || routeGroup || routeTaskName"
+      class="app-surface mb-6 flex flex-wrap items-center justify-between gap-3 p-4"
+    >
+      <div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.scope.label') }}</div>
+        <div class="mt-2 flex flex-wrap gap-2 text-sm">
+          <span v-if="routeCategory" class="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700">{{ routeCategory }}</span>
+          <span v-if="routeGroup" class="rounded-full bg-emerald-50 px-3 py-1 font-medium text-emerald-700">{{ routeGroup }}</span>
+          <span v-if="routeTaskName" class="rounded-full bg-blue-50 px-3 py-1 font-medium text-blue-700">{{ routeTaskName }}</span>
+        </div>
+      </div>
+      <Button variant="outline" @click="clearTaskScope">{{ t('tasks.scope.viewAll') }}</Button>
+    </div>
+
+    <div class="mb-6 grid gap-4 md:grid-cols-4">
+      <div class="app-surface p-4">
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.categoryCount') }}</div>
+        <div class="mt-2 text-2xl font-black text-slate-800">{{ groupedStats.categoryCount }}</div>
+      </div>
+      <div class="app-surface p-4">
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.groupCount') }}</div>
+        <div class="mt-2 text-2xl font-black text-slate-800">{{ groupedStats.groupCount }}</div>
+      </div>
+      <div class="app-surface p-4">
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.taskCount') }}</div>
+        <div class="mt-2 text-2xl font-black text-slate-800">{{ groupedStats.taskCount }}</div>
+      </div>
+      <div class="app-surface p-4">
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.runningCount') }}</div>
+        <div class="mt-2 text-2xl font-black text-emerald-600">{{ groupedStats.runningCount }}</div>
+      </div>
+    </div>
+
+    <div class="space-y-8">
+      <section
+        v-for="category in visibleGroupedTaskCategories"
+        :key="category.name"
+        class="space-y-4"
+      >
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <h2 class="text-xl font-black tracking-tight text-slate-800">{{ category.name }}</h2>
+            <p class="mt-1 text-sm text-slate-500">
+              {{ t('tasks.category.summary', { total: category.totalTasks, groups: category.groups.length, running: category.runningCount }) }}
+            </p>
+          </div>
+          <Badge variant="secondary" class="bg-slate-100 text-slate-700">
+            {{ t('tasks.category.groupBadge', { count: category.groups.length }) }}
+          </Badge>
+        </div>
+
+        <article
+          v-for="group in category.groups"
+          :key="`${category.name}-${group.name}`"
+          class="app-surface p-4"
+        >
+          <div class="mb-4 flex flex-col gap-3 border-b border-slate-100 pb-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div class="flex flex-wrap items-center gap-2">
+                <h3 class="text-lg font-black text-slate-800">{{ group.name }}</h3>
+                <Badge variant="outline" class="border-slate-200 bg-slate-50 text-slate-600">
+                  {{ category.name }}
+                </Badge>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-4 text-sm text-slate-500">
+                <span>{{ t('tasks.group.taskCount', { count: group.tasks.length }) }}</span>
+                <span>{{ t('tasks.group.enabledCount', { count: group.enabledCount }) }}</span>
+                <span>{{ t('tasks.group.runningCount', { count: group.runningCount }) }}</span>
+                <span>
+                  {{ t('tasks.group.budgetLabel') }}
+                  {{
+                    group.budgetMin !== null || group.budgetMax !== null
+                      ? `¥${group.budgetMin ?? '—'} - ${group.budgetMax ?? '—'}`
+                      : t('tasks.group.budgetNotSet')
+                  }}
+                </span>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <Button variant="outline" @click="openGroupResults(category.name, group.name)">
+                {{ t('tasks.group.viewResults') }}
+              </Button>
+              <Button
+                variant="outline"
+                @click="openGroupLogs(category.name, group.name, group.tasks[0]?.id)"
+              >
+                {{ t('tasks.group.viewLogs') }}
+              </Button>
+            </div>
+          </div>
+
+          <TasksTable
+            :tasks="group.tasks"
+            :is-loading="isLoading"
+            :stopping-ids="stoppingTaskIds"
+            @delete-task="handleDeleteTask"
+            @edit-task="handleEditTask"
+            @run-task="handleStartTask"
+            @stop-task="handleStopTask"
+            @refresh-criteria="handleOpenCriteriaDialog"
+            @toggle-enabled="handleToggleEnabled"
+            @open-results="openTaskResults"
+            @open-logs="openTaskLogs"
+          />
+        </article>
+      </section>
+    </div>
 
     <Dialog v-model:open="isDeleteDialogOpen">
       <DialogContent class="sm:max-w-[420px]">

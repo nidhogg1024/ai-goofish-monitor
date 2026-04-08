@@ -1,10 +1,10 @@
 """
 Telegram 通知客户端
 """
-import asyncio
-from typing import Dict
+import html
+from typing import Dict, Optional
 
-import requests
+import httpx
 
 from src.infrastructure.config.settings import DEFAULT_TELEGRAM_API_BASE_URL
 
@@ -19,8 +19,8 @@ class TelegramClient(NotificationClient):
 
     def __init__(
         self,
-        bot_token: str = None,
-        chat_id: str = None,
+        bot_token: Optional[str] = None,
+        chat_id: Optional[str] = None,
         api_base_url: str = DEFAULT_TELEGRAM_API_BASE_URL,
         pcurl_to_mobile: bool = True,
     ):
@@ -37,18 +37,23 @@ class TelegramClient(NotificationClient):
             raise RuntimeError("Telegram 未启用")
 
         message = self._build_message(product_data, reason)
+        safe_title = html.escape(message.title[:50])
+        ellipsis = "..." if len(message.title) > 50 else ""
         telegram_message = [
             "🚨 <b>新推荐!</b>",
             "",
-            f"<b>{message.title[:50]}{'...' if len(message.title) > 50 else ''}</b>",
+            f"<b>{safe_title}{ellipsis}</b>",
             "",
-            f"💰 价格: {message.price}",
-            f"📝 原因: {message.reason}",
+            f"💰 价格: {html.escape(message.price)}",
+            f"📝 原因: {html.escape(message.reason)}",
         ]
         if message.mobile_link:
-            telegram_message.append(f"📱 <a href='{message.mobile_link}'>手机端链接</a>")
-        telegram_message.append(f"💻 <a href='{message.desktop_link}'>电脑端链接</a>")
+            safe_mobile = html.escape(message.mobile_link)
+            telegram_message.append(f'📱 <a href="{safe_mobile}">手机端链接</a>')
+        safe_desktop = html.escape(message.desktop_link)
+        telegram_message.append(f'💻 <a href="{safe_desktop}">电脑端链接</a>')
 
+        # bot_token appears in URL path per Telegram Bot API requirement
         telegram_api_url = f"{self.api_base_url}/bot{self.bot_token}/sendMessage"
         telegram_payload = {
             "chat_id": self.chat_id,
@@ -58,17 +63,13 @@ class TelegramClient(NotificationClient):
         }
 
         headers = {"Content-Type": "application/json"}
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
                 telegram_api_url,
                 json=telegram_payload,
                 headers=headers,
-                timeout=10
             )
-        )
-        response.raise_for_status()
-        result = response.json()
-        if not result.get("ok"):
-            raise RuntimeError(result.get("description", "Telegram 返回未知错误"))
+            response.raise_for_status()
+            result = response.json()
+            if not result.get("ok"):
+                raise RuntimeError(result.get("description", "Telegram 返回未知错误"))
