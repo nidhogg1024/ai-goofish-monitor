@@ -1746,11 +1746,32 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         except LoginRequiredError as e:
             last_error = str(e)
             logger.warning("检测到登录失效/重定向: %s", e)
+            if rotation_settings["account_enabled"]:
+                account_pool.mark_bad(selected_account, last_error)
+                next_account = _select_account(force_new=True)
+                if next_account:
+                    selected_account = next_account
+                    logger.info("登录失效，已切换到账号: %s", selected_account.value)
+                    continue
+                logger.warning("无可用账号可切换，停止重试。")
             break
         except RiskControlError as e:
             last_error = str(e)
             logger.warning("检测到风控或验证触发: %s", e)
-            # 风控验证通常不是简单轮换能解决的，避免无意义重试。
+            GLOBAL_RISK_GUARD.activate(
+                task_name=task_config.get("task_name", "未命名任务"),
+                keyword=task_config.get("keyword", ""),
+                reason=last_error,
+            )
+            if rotation_settings["account_enabled"]:
+                account_pool.mark_bad(selected_account, last_error)
+                next_account = _select_account(force_new=True)
+                if next_account:
+                    selected_account = next_account
+                    logger.info("风控触发，已切换到账号: %s", selected_account.value)
+                    await asyncio.sleep(random.uniform(5, 15))
+                    continue
+                logger.warning("无可用账号可切换，停止重试。")
             break
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
