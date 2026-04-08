@@ -31,7 +31,11 @@ def test_account_crud_uses_configured_state_dir(tmp_path, monkeypatch):
 
     detail_response = client.get("/api/accounts/%E4%B8%BB%E8%B4%A6%E5%8F%B7")
     assert detail_response.status_code == 200
-    assert '"cookies"' in detail_response.json()["content"]
+    content = detail_response.json()["content"]
+    if isinstance(content, str):
+        assert '"cookies"' in content
+    else:
+        assert "cookies" in content
 
     update_response = client.put(
         "/api/accounts/%E4%B8%BB%E8%B4%A6%E5%8F%B7",

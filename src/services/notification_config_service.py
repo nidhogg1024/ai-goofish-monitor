@@ -82,6 +82,10 @@ class NotificationSettingsValidationError(ValueError):
 
 
 def model_dump(model, *, exclude_unset: bool = False) -> dict:
+    # Pydantic v1 .dict() and v2 .model_dump() both support exclude_unset,
+    # but v2 tracks field assignment differently with model_construct.
+    # Callers that rely on exclude_unset should ensure the model was created
+    # via normal __init__ rather than model_construct.
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_unset=exclude_unset)
     return model.dict(exclude_unset=exclude_unset)
@@ -275,6 +279,10 @@ def load_notification_settings() -> NotificationSettings:
 
 
 def _build_notification_settings_model(values: dict) -> NotificationSettings:
+    # Uses model_construct/construct intentionally to skip Pydantic validation:
+    # values are already validated by _normalize_notification_values and
+    # _validate_notification_settings; skipping re-validation avoids env_file
+    # side effects and allows constructing partial models for testing.
     if hasattr(NotificationSettings, "model_construct"):
         return NotificationSettings.model_construct(**values)
     return NotificationSettings.construct(**values)
@@ -368,7 +376,12 @@ def _validate_notification_settings(settings: NotificationSettings) -> None:
         )
 
     if settings.webhook_content_type == "FORM" and settings.webhook_body:
-        parsed_body = json.loads(settings.webhook_body)
+        try:
+            parsed_body = json.loads(settings.webhook_body)
+        except json.JSONDecodeError as exc:
+            raise NotificationSettingsValidationError(
+                f"WEBHOOK_BODY 不是合法 JSON: {exc.msg}"
+            ) from exc
         if not isinstance(parsed_body, dict):
             raise NotificationSettingsValidationError(
                 "WEBHOOK_BODY 在 FORM 模式下必须是 JSON 对象"

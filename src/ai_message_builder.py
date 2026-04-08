@@ -1,6 +1,7 @@
 """
 AI 请求消息构造辅助函数
 """
+import textwrap
 from typing import Dict, List, Union
 
 
@@ -22,15 +23,17 @@ def build_analysis_text_prompt(
         "你可以额外输出可选字段 value_score(0-100) 和 value_summary，"
         "但必须保留原有 is_recommended/reason 等字段。\n"
     )
-    return f"""请基于你的专业知识和我的要求，分析以下完整的商品JSON数据：
+    raw = f"""\
+请基于你的专业知识和我的要求，分析以下完整的商品JSON数据：
 
 ```json
 {product_json}
 ```
 
-    {prompt_text}
-    {value_note}
-    {note}"""
+{prompt_text}
+{value_note}
+{note}"""
+    return textwrap.dedent(raw)
 
 
 def build_user_message_content(

@@ -1,6 +1,9 @@
 """
 批量任务生成路由
 """
+import logging
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -21,6 +24,11 @@ from src.services.task_intent_service import enrich_generate_request
 from src.services.task_payloads import serialize_task
 from src.services.task_service import TaskService
 
+logger = logging.getLogger(__name__)
+
+# TODO: This router shares the /api/tasks prefix with tasks.py.
+# Changing it would break the existing API contract. Consider migrating
+# to /api/batch-tasks in a future major version with a deprecation period.
 router = APIRouter(prefix="/api/tasks", tags=["batch-tasks"])
 
 
@@ -45,8 +53,10 @@ async def batch_generate(
     if not url and not description:
         raise HTTPException(status_code=400, detail="请至少填写链接或需求描述。")
 
-    if url and not url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="请输入有效的 URL 地址。")
+    if url:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise HTTPException(status_code=400, detail="请输入有效的 URL 地址。")
 
     job = await service.create_job()
     service.track(
@@ -119,15 +129,17 @@ async def batch_create(
                 "error": str(exc),
             })
 
-    # Reload scheduler
     try:
         all_tasks = await task_service.get_all_tasks()
         await scheduler_service.reload_jobs(all_tasks)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("批量创建后重新加载调度器失败: %s", exc)
 
     success_count = sum(1 for r in results if r["success"])
+    fail_count = len(results) - success_count
     return {
         "message": f"批量创建完成：{success_count}/{len(results)} 个任务创建成功。",
+        "success_count": success_count,
+        "fail_count": fail_count,
         "results": results,
     }

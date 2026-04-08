@@ -10,6 +10,8 @@ import BatchCreateDialog from '@/components/tasks/BatchCreateDialog.vue'
 import TasksTable from '@/components/tasks/TasksTable.vue'
 import TaskForm from '@/components/tasks/TaskForm.vue'
 import { listAccounts, type AccountItem } from '@/api/accounts'
+import { normalizeTasks } from '@/lib/normalizeTask'
+import { canStartTask } from '@/lib/taskSchedule'
 import { Button } from '@/components/ui/button'
 import Badge from '@/components/ui/badge/Badge.vue'
 import { Textarea } from '@/components/ui/textarea'
@@ -58,13 +60,7 @@ const editDefaults = computed(() => parseTaskFormDefaults(route.query))
 const routeCategory = computed(() => typeof route.query.category === 'string' ? route.query.category : null)
 const routeGroup = computed(() => typeof route.query.group === 'string' ? route.query.group : null)
 const routeTaskName = computed(() => typeof route.query.task === 'string' ? route.query.task : null)
-const normalizedTasks = computed(() =>
-  tasks.value.map((task) => ({
-    ...task,
-    category: task.category || '未分类',
-    group_name: task.group_name || '默认任务组',
-  })),
-)
+const normalizedTasks = computed(() => normalizeTasks(tasks.value))
 const groupedTaskCategories = computed(() => {
   const categoryMap = new Map<string, {
     name: string
@@ -81,8 +77,8 @@ const groupedTaskCategories = computed(() => {
   }>()
 
   for (const task of normalizedTasks.value) {
-    const categoryName = task.category || '未分类'
-    const groupName = task.group_name || '默认任务组'
+    const categoryName = task.category || t('tasks.defaults.uncategorized')
+    const groupName = task.group_name || t('tasks.defaults.defaultGroup')
     if (!categoryMap.has(categoryName)) {
       categoryMap.set(categoryName, {
         name: categoryName,
@@ -247,23 +243,16 @@ async function handleRefreshCriteria() {
 
 const isStartingAll = ref(false)
 
-const canStartTask = (task: Task) =>
-  task.enabled &&
-  !task.is_running &&
-  !task.is_queued &&
-  task.execution_state !== 'queued' &&
-  task.execution_state !== 'running'
-
 const startableTaskCount = computed(() =>
-  tasks.value.filter((t) => canStartTask(t)).length,
+  tasks.value.filter((task) => canStartTask(task)).length,
 )
 
 async function handleStartAll() {
-  const toStart = tasks.value.filter((t) => canStartTask(t))
+  const toStart = tasks.value.filter((task) => canStartTask(task))
   if (!toStart.length) return
   isStartingAll.value = true
   try {
-    await Promise.allSettled(toStart.map((t) => startTask(t.id)))
+    await Promise.allSettled(toStart.map((task) => startTask(task.id)))
   } finally {
     isStartingAll.value = false
   }
@@ -293,19 +282,28 @@ async function handleStopTask(taskId: number) {
   }
 }
 
+const _toggleTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
 async function handleToggleEnabled(task: Task, enabled: boolean) {
   const previous = task.enabled
   task.enabled = enabled
-  try {
-    await updateTask(task.id, { enabled })
-  } catch (e) {
-    task.enabled = previous
-    toast({
-      title: t('tasks.toasts.toggleFailed'),
-      description: (e as Error).message,
-      variant: 'destructive',
-    })
-  }
+
+  const existingTimer = _toggleTimers.get(task.id)
+  if (existingTimer) clearTimeout(existingTimer)
+
+  _toggleTimers.set(task.id, setTimeout(async () => {
+    _toggleTimers.delete(task.id)
+    try {
+      await updateTask(task.id, { enabled })
+    } catch (e) {
+      task.enabled = previous
+      toast({
+        title: t('tasks.toasts.toggleFailed'),
+        description: (e as Error).message,
+        variant: 'destructive',
+      })
+    }
+  }, 300))
 }
 
 function openTaskResults(task: Task) {
@@ -375,7 +373,7 @@ function clearTaskScope() {
           {{ t('tasks.title') }}
         </h1>
         <p class="mt-1 text-sm text-slate-500">
-          按分类与任务组管理监控池，避免不同购买目标平铺混杂。
+          {{ t('tasks.viewDescription') }}
         </p>
       </div>
       <div class="flex gap-2">
@@ -452,31 +450,31 @@ function clearTaskScope() {
       class="app-surface mb-6 flex flex-wrap items-center justify-between gap-3 p-4"
     >
       <div>
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">当前范围</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.scope.label') }}</div>
         <div class="mt-2 flex flex-wrap gap-2 text-sm">
           <span v-if="routeCategory" class="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700">{{ routeCategory }}</span>
           <span v-if="routeGroup" class="rounded-full bg-emerald-50 px-3 py-1 font-medium text-emerald-700">{{ routeGroup }}</span>
           <span v-if="routeTaskName" class="rounded-full bg-blue-50 px-3 py-1 font-medium text-blue-700">{{ routeTaskName }}</span>
         </div>
       </div>
-      <Button variant="outline" @click="clearTaskScope">查看全部任务</Button>
+      <Button variant="outline" @click="clearTaskScope">{{ t('tasks.scope.viewAll') }}</Button>
     </div>
 
     <div class="mb-6 grid gap-4 md:grid-cols-4">
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">分类数</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.categoryCount') }}</div>
         <div class="mt-2 text-2xl font-black text-slate-800">{{ groupedStats.categoryCount }}</div>
       </div>
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">任务组</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.groupCount') }}</div>
         <div class="mt-2 text-2xl font-black text-slate-800">{{ groupedStats.groupCount }}</div>
       </div>
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">任务总数</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.taskCount') }}</div>
         <div class="mt-2 text-2xl font-black text-slate-800">{{ groupedStats.taskCount }}</div>
       </div>
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">运行中</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('tasks.stats.runningCount') }}</div>
         <div class="mt-2 text-2xl font-black text-emerald-600">{{ groupedStats.runningCount }}</div>
       </div>
     </div>
@@ -491,11 +489,11 @@ function clearTaskScope() {
           <div>
             <h2 class="text-xl font-black tracking-tight text-slate-800">{{ category.name }}</h2>
             <p class="mt-1 text-sm text-slate-500">
-              {{ category.totalTasks }} 个任务，{{ category.groups.length }} 个任务组，当前运行 {{ category.runningCount }} 个
+              {{ t('tasks.category.summary', { total: category.totalTasks, groups: category.groups.length, running: category.runningCount }) }}
             </p>
           </div>
           <Badge variant="secondary" class="bg-slate-100 text-slate-700">
-            {{ category.groups.length }} 组
+            {{ t('tasks.category.groupBadge', { count: category.groups.length }) }}
           </Badge>
         </div>
 
@@ -513,28 +511,28 @@ function clearTaskScope() {
                 </Badge>
               </div>
               <div class="mt-2 flex flex-wrap gap-4 text-sm text-slate-500">
-                <span>{{ group.tasks.length }} 个候选任务</span>
-                <span>已启用 {{ group.enabledCount }} 个</span>
-                <span>运行中 {{ group.runningCount }} 个</span>
+                <span>{{ t('tasks.group.taskCount', { count: group.tasks.length }) }}</span>
+                <span>{{ t('tasks.group.enabledCount', { count: group.enabledCount }) }}</span>
+                <span>{{ t('tasks.group.runningCount', { count: group.runningCount }) }}</span>
                 <span>
-                  预算
+                  {{ t('tasks.group.budgetLabel') }}
                   {{
                     group.budgetMin !== null || group.budgetMax !== null
                       ? `¥${group.budgetMin ?? '—'} - ${group.budgetMax ?? '—'}`
-                      : '未设置'
+                      : t('tasks.group.budgetNotSet')
                   }}
                 </span>
               </div>
             </div>
             <div class="flex flex-wrap gap-2">
               <Button variant="outline" @click="openGroupResults(category.name, group.name)">
-                查看情报
+                {{ t('tasks.group.viewResults') }}
               </Button>
               <Button
                 variant="outline"
                 @click="openGroupLogs(category.name, group.name, group.tasks[0]?.id)"
               >
-                查看日志
+                {{ t('tasks.group.viewLogs') }}
               </Button>
             </div>
           </div>

@@ -41,6 +41,14 @@ class JsonTaskRepository(TaskRepository):
             return tasks[task_id]
         return None
 
+    async def find_by_name(self, task_name: str) -> Optional[Task]:
+        """根据名称获取任务"""
+        tasks = await self.find_all()
+        for task in tasks:
+            if task.task_name == task_name:
+                return task
+        return None
+
     async def save(self, task: Task) -> Task:
         """保存任务（创建或更新）"""
         tasks = await self.find_all()

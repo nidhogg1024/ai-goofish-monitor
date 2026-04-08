@@ -5,14 +5,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from fastapi import HTTPException
-
 from src.infrastructure.config.env_manager import env_manager
+
+logger = logging.getLogger(__name__)
+
+_MAX_FILENAME_ATTEMPTS = 10000
+
+
+class AccountError(Exception):
+    """账号业务异常基类"""
+    def __init__(self, detail: str, status_code: int = 400):
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
 
 
 MANIFEST_FILENAME = ".accounts.json"
@@ -42,11 +53,11 @@ def ensure_state_dir() -> Path:
 def validate_display_name(name: str) -> str:
     trimmed = str(name or "").strip()
     if not trimmed:
-        raise HTTPException(status_code=400, detail="账号名称不能为空。")
+        raise AccountError("账号名称不能为空。", status_code=400)
     if len(trimmed) > 50:
-        raise HTTPException(status_code=400, detail="账号名称最多 50 个字符。")
+        raise AccountError("账号名称最多 50 个字符。", status_code=400)
     if INVALID_DISPLAY_CHARS_RE.search(trimmed):
-        raise HTTPException(status_code=400, detail="账号名称不能包含斜杠或控制字符。")
+        raise AccountError("账号名称不能包含斜杠或控制字符。", status_code=400)
     return trimmed
 
 
@@ -60,7 +71,8 @@ def _load_manifest() -> Dict[str, str]:
         return {}
     try:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("加载账号清单文件失败: %s", exc)
         return {}
     if not isinstance(data, dict):
         return {}
@@ -101,12 +113,11 @@ def _build_filename(display_name: str, existing_filenames: set[str]) -> str:
     if candidate not in existing_filenames:
         return candidate
 
-    index = 2
-    while True:
+    for index in range(2, 2 + _MAX_FILENAME_ATTEMPTS):
         fallback = f"{normalized}-{suffix}-{index}.json"
         if fallback not in existing_filenames:
             return fallback
-        index += 1
+    raise AccountError("无法生成唯一文件名", status_code=500)
 
 
 def list_account_entries() -> List[dict]:
@@ -147,7 +158,7 @@ def resolve_account(display_name: str) -> Tuple[str, Path]:
     if legacy_path.exists():
         return account_name, legacy_path
 
-    raise HTTPException(status_code=404, detail="账号不存在")
+    raise AccountError("账号不存在", status_code=404)
 
 
 def create_account_entry(display_name: str) -> Tuple[str, Path]:
@@ -165,11 +176,11 @@ def prepare_account_path(display_name: str) -> Tuple[str, Path]:
     manifest = _load_manifest()
 
     if account_name in manifest:
-        raise HTTPException(status_code=409, detail="账号已存在")
+        raise AccountError("账号已存在", status_code=409)
 
     legacy_path = state_dir / f"{account_name}.json"
     if legacy_path.exists():
-        raise HTTPException(status_code=409, detail="账号已存在")
+        raise AccountError("账号已存在", status_code=409)
 
     existing_filenames = {path.name for path in _iter_state_files()}
     filename = _build_filename(account_name, existing_filenames)
@@ -181,16 +192,16 @@ def register_account_path(display_name: str, path: Path) -> Tuple[str, Path]:
     account_name = validate_display_name(display_name)
     state_dir = ensure_state_dir()
     if path.parent != state_dir:
-        raise HTTPException(status_code=400, detail="账号文件必须保存在 state 目录下。")
+        raise AccountError("账号文件必须保存在 state 目录下。", status_code=400)
 
     manifest = _load_manifest()
     existing_path = manifest.get(account_name)
     if existing_path and existing_path != path.name:
-        raise HTTPException(status_code=409, detail="账号已存在")
+        raise AccountError("账号已存在", status_code=409)
 
     legacy_path = state_dir / f"{account_name}.json"
     if legacy_path.exists() and legacy_path.name != path.name:
-        raise HTTPException(status_code=409, detail="账号已存在")
+        raise AccountError("账号已存在", status_code=409)
 
     manifest[account_name] = path.name
     _save_manifest(manifest)
@@ -198,6 +209,10 @@ def register_account_path(display_name: str, path: Path) -> Tuple[str, Path]:
 
 
 def delete_account_entry(display_name: str) -> Path:
+    """Remove the account from the manifest and return its file path.
+    NOTE: The actual state file on disk is NOT deleted; callers should
+    remove it explicitly if needed.
+    """
     account_name = validate_display_name(display_name)
     state_dir = ensure_state_dir()
     manifest = _load_manifest()
@@ -211,4 +226,4 @@ def delete_account_entry(display_name: str) -> Path:
     if legacy_path.exists():
         return legacy_path
 
-    raise HTTPException(status_code=404, detail="账号不存在")
+    raise AccountError("账号不存在", status_code=404)

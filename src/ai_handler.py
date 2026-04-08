@@ -25,6 +25,7 @@ from src.config import (
     MODEL_NAME,
     ENABLE_RESPONSE_FORMAT,
     client,
+    get_ai_request_params,
 )
 from src.ai_message_builder import (
     build_analysis_text_prompt,
@@ -74,8 +75,7 @@ def safe_print(text):
         # 如果遇到编码错误，尝试用ASCII编码并忽略无法编码的字符
         try:
             print(text.encode('ascii', errors='ignore').decode('ascii'))
-        except:
-            # 如果还是失败，打印一个简化的消息
+        except Exception:
             print("[输出包含无法显示的字符]")
 
 
@@ -349,7 +349,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
 
         # 生成日志文件名（当前时间）
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f"{current_time}.log"
+        log_filename = f"{current_time}_{product_id}.log"
         log_filepath = os.path.join(logs_dir, log_filename)
 
         task_name = product_data.get("任务名称") or product_data.get("任务名") or "unknown"
@@ -381,8 +381,6 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
         try:
             # 根据重试次数调整参数
             current_temperature = 0.1 if attempt == 0 else 0.05  # 重试时使用更低的温度
-
-            from src.config import get_ai_request_params
 
             request_params = build_ai_request_params(
                 api_mode,

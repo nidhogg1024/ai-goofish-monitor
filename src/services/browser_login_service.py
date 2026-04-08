@@ -6,6 +6,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import os
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -31,6 +34,8 @@ LOGIN_ENTRY_SELECTORS = (
     "button:has-text('登录')",
     "a:has-text('登录')",
 )
+logger = logging.getLogger(__name__)
+
 TASK_FAILURE_GUARD = FailureGuard()
 GLOBAL_RISK_GUARD = GlobalRiskControlGuard(
     cooldown_seconds=app_settings.risk_control_cooldown_seconds
@@ -288,17 +293,34 @@ class BrowserLoginService:
         job = self._jobs[job_id]
         account_path = Path(job["account_path"])
         account_path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(account_path.write_text, serialized, "utf-8")
+        await asyncio.to_thread(self._atomic_write, account_path, serialized)
         register_account_path(job["account_name"], account_path)
 
+        # Writing both account file and default state file is NOT atomic
+        # across the two files; a crash between writes may leave them out of sync.
         if job.get("set_as_default"):
             default_state_path = Path(job["default_state_path"])
             if default_state_path.parent != Path("."):
                 default_state_path.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(default_state_path.write_text, serialized, "utf-8")
+            await asyncio.to_thread(self._atomic_write, default_state_path, serialized)
 
         TASK_FAILURE_GUARD.reset_all()
         GLOBAL_RISK_GUARD.clear()
+
+    @staticmethod
+    def _atomic_write(path: Path, content: str) -> None:
+        dir_path = str(path.parent) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
 
     async def _build_snapshot(self, storage_state: Dict[str, Any], page) -> Dict[str, Any]:
         metadata = await page.evaluate(

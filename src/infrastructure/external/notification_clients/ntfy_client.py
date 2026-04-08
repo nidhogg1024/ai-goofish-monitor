@@ -1,9 +1,10 @@
 """
 Ntfy 通知客户端
 """
-import asyncio
-import requests
-from typing import Dict
+from typing import Dict, Optional
+
+import httpx
+
 from .base import NotificationClient
 
 
@@ -13,7 +14,7 @@ class NtfyClient(NotificationClient):
     channel_key = "ntfy"
     display_name = "Ntfy"
 
-    def __init__(self, topic_url: str = None, pcurl_to_mobile: bool = True):
+    def __init__(self, topic_url: Optional[str] = None, pcurl_to_mobile: bool = True):
         super().__init__(enabled=bool(topic_url), pcurl_to_mobile=pcurl_to_mobile)
         self.topic_url = topic_url
 
@@ -23,18 +24,14 @@ class NtfyClient(NotificationClient):
             raise RuntimeError("Ntfy 未启用")
 
         message = self._build_message(product_data, reason)
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
                 self.topic_url,
-                data=message.content.encode('utf-8'),
+                content=message.content.encode('utf-8'),
                 headers={
-                    "Title": message.notification_title.encode('utf-8'),
+                    "Title": message.notification_title,
                     "Priority": "urgent",
-                    "Tags": "bell,vibration"
+                    "Tags": "bell,vibration",
                 },
-                timeout=10
             )
-        )
-        response.raise_for_status()
+            response.raise_for_status()

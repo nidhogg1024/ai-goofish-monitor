@@ -1,4 +1,4 @@
-import { ref, reactive, watch, onMounted, computed } from 'vue'
+import { ref, reactive, watch, onMounted, onScopeDispose, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import type { ResultInsights, ResultItem } from '@/types/result.d.ts'
@@ -240,15 +240,17 @@ export function useResults() {
     })
   )
 
-  // Watchers
+  let _filterDebounce: ReturnType<typeof setTimeout> | null = null
   watch([selectedCategory, selectedGroup, selectedTaskName, filters], () => {
-    fetchResults()
-    fetchInsights()
+    if (_filterDebounce) clearTimeout(_filterDebounce)
+    _filterDebounce = setTimeout(() => {
+      _filterDebounce = null
+      fetchResults()
+      fetchInsights()
+    }, 300)
   }, { deep: true })
   watch(selectedFile, (value) => {
     if (value) localStorage.setItem('lastSelectedResultFile', value)
-  })
-  watch(selectedFile, (value) => {
     if (!value) {
       selectedCategory.value = null
       selectedGroup.value = null
@@ -318,7 +320,17 @@ export function useResults() {
     { immediate: true }
   )
 
-  // Lifecycle
+  onScopeDispose(() => {
+    if (readyTimer) {
+      clearTimeout(readyTimer)
+      readyTimer = null
+    }
+    if (_filterDebounce) {
+      clearTimeout(_filterDebounce)
+      _filterDebounce = null
+    }
+  })
+
   onMounted(async () => {
     await Promise.all([fetchFiles(), fetchTaskNameMap()])
     // 初始加载结果（全部分类时也展示数据）

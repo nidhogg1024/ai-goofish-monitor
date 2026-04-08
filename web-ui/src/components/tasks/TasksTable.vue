@@ -29,7 +29,7 @@ import {
   ChartColumn,
   ScrollText,
 } from 'lucide-vue-next'
-import { formatCountdown, formatNextRunAbsolute } from '@/lib/taskSchedule'
+import { formatCountdown, formatNextRunAbsolute, canStartTask } from '@/lib/taskSchedule'
 
 interface Props {
   tasks: Task[]
@@ -70,8 +70,8 @@ const resolveAccountName = (task: Task) => {
 }
 
 const resolveCountdownText = (task: Task) => {
-  if (task.execution_state === 'queued' || task.is_queued) return '等待队列执行'
-  if (task.execution_state === 'running' || task.is_running) return '执行中'
+  if (task.execution_state === 'queued' || task.is_queued) return t('tasks.table.queuedWaiting')
+  if (task.execution_state === 'running' || task.is_running) return t('tasks.table.executing')
   if (!task.cron) return t('tasks.table.manualTrigger')
   if (!task.enabled) return t('tasks.table.disabled')
   return formatCountdown(task.next_run_at, nowMs.value) || t('tasks.table.waitingSchedule')
@@ -90,13 +90,6 @@ const resolveNextRunLabel = (task: Task) => {
   return formatNextRunAbsolute(task.next_run_at)
 }
 
-const canStartTask = (task: Task) =>
-  task.enabled &&
-  !task.is_running &&
-  !task.is_queued &&
-  task.execution_state !== 'queued' &&
-  task.execution_state !== 'running'
-
 const emit = defineEmits<{
   (e: 'delete-task', taskId: number): void
   (e: 'run-task', taskId: number): void
@@ -110,6 +103,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
+  <!-- TODO: Mobile (lg:hidden) and desktop (hidden lg:block) templates duplicate ~580 lines of markup. Consider extracting shared task-row components (e.g. TaskCardMobile / TaskRowDesktop) or using a responsive slot-based layout to reduce duplication. -->
   <div class="app-surface overflow-hidden animate-fade-in">
     <div class="space-y-4 p-4 lg:hidden">
       <template v-if="isLoading && tasks.length === 0">
@@ -266,7 +260,7 @@ const emit = defineEmits<{
               @click="emit('run-task', task.id)"
             >
               <Play class="mr-1 h-3.5 w-3.5 fill-current" />
-              {{ task.execution_state === 'queued' ? '已排队' : t('tasks.table.start') }}
+              {{ task.execution_state === 'queued' ? t('tasks.table.queued') : t('tasks.table.start') }}
             </Button>
             <Button
               v-else
@@ -285,17 +279,17 @@ const emit = defineEmits<{
               size="icon"
               variant="outline"
               class="size-10"
-              :aria-label="`查看 ${task.task_name} 的情报`"
-              @click="emit('open-results', task)"
-            >
-              <ChartColumn class="h-4 w-4" />
-            </Button>
-            <Button
-              size="icon"
-              variant="outline"
-              class="size-10"
-              :aria-label="`查看 ${task.task_name} 的日志`"
-              @click="emit('open-logs', task)"
+                    :aria-label="t('tasks.table.viewResults', { task: task.task_name })"
+                    @click="emit('open-results', task)"
+                  >
+                    <ChartColumn class="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    class="size-10"
+                    :aria-label="t('tasks.table.viewLogs', { task: task.task_name })"
+                    @click="emit('open-logs', task)"
             >
               <ScrollText class="h-4 w-4" />
             </Button>
@@ -512,7 +506,7 @@ const emit = defineEmits<{
                     @click="emit('run-task', task.id)"
                   >
                   <Play class="w-3 h-3 mr-1.5 fill-current" />
-                  <span class="font-bold text-[11px]">{{ task.execution_state === 'queued' || task.is_queued ? '已排队' : t('tasks.table.start') }}</span>
+                  <span class="font-bold text-[11px]">{{ task.execution_state === 'queued' || task.is_queued ? t('tasks.table.queued') : t('tasks.table.start') }}</span>
                 </Button>
                   <Button
                     v-else
@@ -533,8 +527,8 @@ const emit = defineEmits<{
                     size="icon"
                     variant="ghost"
                     class="w-8 h-8 rounded-full text-slate-400 hover:text-primary hover:bg-primary/5 transition-colors"
-                    :aria-label="`查看 ${task.task_name} 的情报`"
-                    :title="`查看 ${task.task_name} 的情报`"
+                    :aria-label="t('tasks.table.viewResults', { task: task.task_name })"
+                    :title="t('tasks.table.viewResults', { task: task.task_name })"
                     @click="emit('open-results', task)"
                   >
                     <ChartColumn class="w-3.5 h-3.5" />
@@ -543,8 +537,8 @@ const emit = defineEmits<{
                     size="icon"
                     variant="ghost"
                     class="w-8 h-8 rounded-full text-slate-400 hover:text-primary hover:bg-primary/5 transition-colors"
-                    :aria-label="`查看 ${task.task_name} 的日志`"
-                    :title="`查看 ${task.task_name} 的日志`"
+                    :aria-label="t('tasks.table.viewLogs', { task: task.task_name })"
+                    :title="t('tasks.table.viewLogs', { task: task.task_name })"
                     @click="emit('open-logs', task)"
                   >
                     <ScrollText class="w-3.5 h-3.5" />

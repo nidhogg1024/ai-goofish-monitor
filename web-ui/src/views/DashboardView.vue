@@ -122,6 +122,7 @@ function goCreateTask() {
 }
 
 function openSuggestion() {
+  if (!suggestion.value?.routeName) return
   router.push({
     name: suggestion.value.routeName,
     query: suggestion.value.query,
@@ -160,7 +161,7 @@ function openActivity(activity: { filename: string | null; type: string }) {
       </div>
     </div>
     <div v-if="error" class="app-alert-error" role="alert">
-      {{ error.message }}
+      {{ error?.message || t('common.error') }}
     </div>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
       <Card
@@ -222,19 +223,19 @@ function openActivity(activity: { filename: string | null; type: string }) {
               <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
                 {{ t('dashboard.focus.currentMedian') }}
                 <span class="font-semibold text-slate-900">
-                  {{ focusInsights?.market_summary.median_price ? `¥${focusInsights.market_summary.median_price}` : '—' }}
+                  {{ focusInsights?.market_summary?.median_price ? `¥${focusInsights.market_summary.median_price}` : '—' }}
                 </span>
               </div>
               <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
                 {{ t('dashboard.focus.historyMin') }}
                 <span class="font-semibold text-slate-900">
-                  {{ focusInsights?.history_summary.min_price ? `¥${focusInsights.history_summary.min_price}` : '—' }}
+                  {{ focusInsights?.history_summary?.min_price ? `¥${focusInsights.history_summary.min_price}` : '—' }}
                 </span>
               </div>
               <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
                 {{ t('dashboard.focus.historyMax') }}
                 <span class="font-semibold text-slate-900">
-                  {{ focusInsights?.history_summary.max_price ? `¥${focusInsights.history_summary.max_price}` : '—' }}
+                  {{ focusInsights?.history_summary?.max_price ? `¥${focusInsights.history_summary.max_price}` : '—' }}
                 </span>
               </div>
             </div>

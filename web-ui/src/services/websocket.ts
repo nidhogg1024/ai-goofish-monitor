@@ -1,31 +1,40 @@
-type WebSocketEventHandler = (data: any) => void;
+type WebSocketEventHandler = (data: unknown) => void;
+
+const MAX_RECONNECT_ATTEMPTS = 20;
+
+function resolveWsUrl(): string {
+  const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
+  if (envUrl) return envUrl;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  return `${protocol}//${host}/ws`;
+}
 
 class WebSocketService {
   private ws: WebSocket | null = null;
   private reconnectInterval = 3000;
+  private reconnectAttempts = 0;
   private listeners: Map<string, WebSocketEventHandler[]> = new Map();
   public isConnected = false;
   private shouldConnect = false;
 
   constructor() {
-    // 延迟连接，等待认证完成
-    // 只有在已登录时才尝试连接
     if (localStorage.getItem('auth_logged_in') === 'true') {
       this.connect();
     }
   }
 
   public start() {
-    // 手动启动 WebSocket 连接
     this.shouldConnect = true;
+    this.reconnectAttempts = 0;
     if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
       this.connect();
     }
   }
 
   public stop() {
-    // 停止 WebSocket 连接
     this.shouldConnect = false;
+    this.reconnectAttempts = 0;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -33,17 +42,13 @@ class WebSocketService {
   }
 
   private connect() {
-    // Determine the protocol (ws or wss) based on the current page protocol
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host; // This includes port if present
+    if (localStorage.getItem('auth_logged_in') !== 'true') return;
 
-    const url = `${protocol}//${host}/ws`;
-
-    console.log(`Connecting to WebSocket at ${url}`);
+    const url = resolveWsUrl();
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
-      console.log('WebSocket connected');
+      this.reconnectAttempts = 0;
       this.isConnected = true;
       this.emit('connected', { isConnected: true });
     };
@@ -51,30 +56,27 @@ class WebSocketService {
     this.ws.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
-        // Expecting message format: { type: 'event_type', data: ... }
         if (message.type) {
           this.emit(message.type, message.data);
         }
-      } catch (e) {
-        console.error('Failed to parse WebSocket message', e);
+      } catch {
+        // ignore malformed messages
       }
     };
 
     this.ws.onclose = () => {
       if (this.isConnected) {
-        console.log('WebSocket disconnected');
         this.isConnected = false;
         this.emit('disconnected', { isConnected: false });
       }
-      // 只有在 shouldConnect 为 true 或已登录时才重连
-      if (this.shouldConnect || localStorage.getItem('auth_logged_in') === 'true') {
-        setTimeout(() => this.connect(), this.reconnectInterval);
-      }
+      if (localStorage.getItem('auth_logged_in') !== 'true') return;
+      if (!this.shouldConnect && localStorage.getItem('auth_logged_in') !== 'true') return;
+      if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return;
+      this.reconnectAttempts++;
+      setTimeout(() => this.connect(), this.reconnectInterval);
     };
 
-    this.ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      // Close will trigger onclose which handles reconnect
+    this.ws.onerror = () => {
       this.ws?.close();
     };
   }
@@ -96,7 +98,7 @@ class WebSocketService {
     }
   }
 
-  private emit(event: string, data: any) {
+  private emit(event: string, data: unknown) {
     const handlers = this.listeners.get(event);
     if (handlers) {
       handlers.forEach((handler) => handler(data));
@@ -104,5 +106,4 @@ class WebSocketService {
   }
 }
 
-// Export a singleton instance
 export const wsService = new WebSocketService();

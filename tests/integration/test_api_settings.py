@@ -242,7 +242,7 @@ def test_notification_test_endpoint_merges_stored_secret_values(tmp_path, monkey
 
     captured = {}
 
-    class _FakeResponse:
+    class _FakeHttpxResponse:
         status_code = 200
 
         def raise_for_status(self):
@@ -251,12 +251,22 @@ def test_notification_test_endpoint_merges_stored_secret_values(tmp_path, monkey
         def json(self):
             return {"ok": True}
 
-    def _fake_post(url, json=None, headers=None, timeout=None):
-        captured["url"] = url
-        captured["json"] = json
-        return _FakeResponse()
+    class _FakeHttpxAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
 
-    monkeypatch.setattr("requests.post", _fake_post)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["json"] = kwargs.get("json")
+            return _FakeHttpxResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeHttpxAsyncClient)
 
     response = client.post(
         "/api/settings/notifications/test",
@@ -287,21 +297,31 @@ def test_notification_test_endpoint_ignores_other_channel_dirty_fields(tmp_path,
 
     captured = []
 
-    class _FakeResponse:
+    class _FakeHttpxResponse:
         status_code = 200
 
         def raise_for_status(self):
             return None
 
-    def _fake_post(url, data=None, headers=None, timeout=None, **kwargs):
-        captured.append({
-            "url": url,
-            "data": data,
-            "headers": headers,
-        })
-        return _FakeResponse()
+    class _FakeHttpxAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
 
-    monkeypatch.setattr("requests.post", _fake_post)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            captured.append({
+                "url": url,
+                "content": kwargs.get("content"),
+                "headers": kwargs.get("headers"),
+            })
+            return _FakeHttpxResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeHttpxAsyncClient)
 
     response = client.post(
         "/api/settings/notifications/test",

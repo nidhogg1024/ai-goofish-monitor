@@ -6,12 +6,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_connection import sqlite_connection
 from src.infrastructure.persistence.storage_names import build_result_filename
 from src.services.price_history_service import parse_price_value
 
+logger = logging.getLogger(__name__)
 
 SORT_COLUMN_MAP = {
     "crawl_time": "crawl_time",
@@ -19,6 +21,15 @@ SORT_COLUMN_MAP = {
     "price": "COALESCE(price, 0)",
     "keyword_hit_count": "keyword_hit_count",
 }
+_SORT_COLUMN_WHITELIST = frozenset(SORT_COLUMN_MAP.keys())
+_storage_bootstrapped = False
+
+
+def _ensure_bootstrap() -> None:
+    global _storage_bootstrapped
+    if not _storage_bootstrapped:
+        bootstrap_sqlite_storage()
+        _storage_bootstrapped = True
 
 
 def _build_scope_query_conditions(
@@ -51,11 +62,13 @@ def _build_scope_query_conditions(
         conditions.append(f"task_name IN ({placeholders})")
         params.extend(normalized_task_names)
 
+    # ai_recommended_only and keyword_recommended_only are mutually exclusive;
+    # if both are set, ai_recommended_only takes precedence.
     if ai_recommended_only:
         conditions.append("is_recommended = 1")
         conditions.append("analysis_source = ?")
         params.append("ai")
-    if keyword_recommended_only:
+    elif keyword_recommended_only:
         conditions.append("is_recommended = 1")
         conditions.append("analysis_source = ?")
         params.append("keyword")
@@ -73,7 +86,7 @@ def _fallback_unique_key(record: dict, item: dict) -> str:
     item_id = str(item.get("商品ID") or "").strip()
     if item_id:
         return f"item:{item_id}"
-    digest = hashlib.sha1(
+    digest = hashlib.sha256(
         json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
     return f"hash:{digest}"
@@ -103,7 +116,9 @@ def _build_query_conditions(
 
 
 def _sort_expression(sort_by: str, sort_order: str) -> str:
-    column = SORT_COLUMN_MAP.get(sort_by, SORT_COLUMN_MAP["crawl_time"])
+    if sort_by not in _SORT_COLUMN_WHITELIST:
+        sort_by = "crawl_time"
+    column = SORT_COLUMN_MAP[sort_by]
     direction = "ASC" if sort_order == "asc" else "DESC"
     return f"{column} {direction}, id {direction}"
 
@@ -113,7 +128,7 @@ async def save_result_record(record: dict, keyword: str) -> bool:
 
 
 def _save_result_record_sync(record: dict, keyword: str) -> bool:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     item = record.get("商品信息", {}) or {}
     analysis = record.get("ai_analysis", {}) or {}
     link = str(item.get("商品链接") or "")
@@ -157,7 +172,7 @@ def _save_result_record_sync(record: dict, keyword: str) -> bool:
 
 
 def load_processed_link_keys(keyword: str) -> set[str]:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     filename = build_result_filename(keyword)
     with sqlite_connection() as conn:
         rows = conn.execute(
@@ -172,7 +187,7 @@ async def list_result_filenames() -> list[str]:
 
 
 def _list_result_filenames_sync() -> list[str]:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     with sqlite_connection() as conn:
         rows = conn.execute(
             """
@@ -190,7 +205,7 @@ async def result_file_exists(filename: str) -> bool:
 
 
 def _result_file_exists_sync(filename: str) -> bool:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     with sqlite_connection() as conn:
         row = conn.execute(
             "SELECT 1 FROM result_items WHERE result_filename = ? LIMIT 1",
@@ -204,7 +219,7 @@ async def delete_result_file_records(filename: str) -> int:
 
 
 def _delete_result_file_records_sync(filename: str) -> int:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     with sqlite_connection() as conn:
         cursor = conn.execute(
             "DELETE FROM result_items WHERE result_filename = ?",
@@ -245,7 +260,7 @@ def _query_result_records_sync(
     page: int,
     limit: int,
 ) -> tuple[int, list[dict]]:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     where_clause, params = _build_query_conditions(
         filename=filename,
         ai_recommended_only=ai_recommended_only,
@@ -297,7 +312,7 @@ def _load_all_result_records_sync(
     sort_by: str,
     sort_order: str,
 ) -> list[dict]:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     where_clause, params = _build_query_conditions(
         filename=filename,
         ai_recommended_only=ai_recommended_only,
@@ -354,7 +369,7 @@ def _query_result_records_by_scope_sync(
     page: int,
     limit: int,
 ) -> tuple[int, list[dict]]:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     where_clause, params = _build_scope_query_conditions(
         filenames=filenames,
         keywords=keywords,
@@ -414,7 +429,7 @@ def _load_all_result_records_by_scope_sync(
     sort_by: str,
     sort_order: str,
 ) -> list[dict]:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     where_clause, params = _build_scope_query_conditions(
         filenames=filenames,
         keywords=keywords,
@@ -452,7 +467,7 @@ async def load_result_summary(filename: str) -> dict | None:
 
 
 def _load_result_summary_sync(filename: str) -> dict | None:
-    bootstrap_sqlite_storage()
+    _ensure_bootstrap()
     with sqlite_connection() as conn:
         aggregate_row = conn.execute(
             """

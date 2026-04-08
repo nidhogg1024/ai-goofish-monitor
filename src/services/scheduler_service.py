@@ -2,6 +2,7 @@
 调度服务
 负责管理定时任务的调度
 """
+import logging
 from datetime import datetime
 from collections import defaultdict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -12,13 +13,17 @@ from src.domain.models.task import Task
 from src.infrastructure.config.settings import settings as app_settings
 from src.services.execution_queue_service import ExecutionQueueService
 
+logger = logging.getLogger(__name__)
+
+SCHEDULER_TIMEZONE = getattr(app_settings, "scheduler_timezone", "Asia/Shanghai")
+
 
 class SchedulerService:
     """调度服务"""
 
     def __init__(self, execution_queue_service: ExecutionQueueService):
         self.scheduler = AsyncIOScheduler(
-            timezone="Asia/Shanghai",
+            timezone=SCHEDULER_TIMEZONE,
             job_defaults={
                 "coalesce": True,
                 "max_instances": 1,
@@ -32,13 +37,13 @@ class SchedulerService:
         """启动调度器"""
         if not self.scheduler.running:
             self.scheduler.start()
-            print("调度器已启动")
+            logger.info("调度器已启动")
 
     def stop(self):
         """停止调度器"""
         if self.scheduler.running:
             self.scheduler.shutdown()
-            print("调度器已停止")
+            logger.info("调度器已停止")
 
     def get_next_run_time(self, task_id: int):
         job = self.scheduler.get_job(f"task_{task_id}")
@@ -61,8 +66,8 @@ class SchedulerService:
 
     async def reload_jobs(self, tasks: List[Task]):
         """重新加载所有定时任务"""
-        print("正在重新加载定时任务...")
-        self.scheduler.remove_all_jobs()
+        logger.info("正在重新加载定时任务...")
+        new_job_ids: set[str] = set()
         grouped_tasks: dict[str, list[Task]] = defaultdict(list)
 
         for task in tasks:
@@ -71,6 +76,7 @@ class SchedulerService:
 
         for normalized_cron, cron_tasks in grouped_tasks.items():
             for index, task in enumerate(sorted(cron_tasks, key=lambda item: (item.id or 0, item.task_name))):
+                job_id = f"task_{task.id}"
                 try:
                     trigger = self._build_staggered_trigger(
                         normalized_cron,
@@ -81,23 +87,29 @@ class SchedulerService:
                         self._run_task,
                         trigger=trigger,
                         args=[task.id, task.task_name],
-                        id=f"task_{task.id}",
+                        id=job_id,
                         name=f"Scheduled: {task.task_name}",
                         replace_existing=True,
                         jitter=self.jitter_seconds,
                     )
-                    print(
-                        f"  -> 已为任务 '{task.task_name}' 添加定时规则: '{task.cron}'"
-                        f" (错峰组 {index + 1}/{len(cron_tasks)})"
+                    new_job_ids.add(job_id)
+                    logger.info(
+                        "  -> 已为任务 '%s' 添加定时规则: '%s'"
+                        " (错峰组 %d/%d)",
+                        task.task_name, task.cron, index + 1, len(cron_tasks),
                     )
                 except ValueError as e:
-                    print(f"  -> [警告] 任务 '{task.task_name}' 的 Cron 表达式无效: {e}")
+                    logger.warning("  -> [警告] 任务 '%s' 的 Cron 表达式无效: %s", task.task_name, e)
 
-        print("定时任务加载完成")
+        for existing_job in self.scheduler.get_jobs():
+            if existing_job.id not in new_job_ids:
+                existing_job.remove()
+
+        logger.info("定时任务加载完成")
 
     async def _run_task(self, task_id: int, task_name: str):
         """执行定时任务"""
-        print(f"定时任务触发: 任务 '{task_name}' 进入执行队列...")
+        logger.info("定时任务触发: 任务 '%s' 进入执行队列...", task_name)
         await self.execution_queue_service.enqueue_task(task_id, task_name, source="scheduler")
 
     def _build_staggered_trigger(
@@ -135,6 +147,11 @@ class SchedulerService:
         return f"{offset}/{step}"
 
     def _extract_step(self, minute_field: str) -> int | None:
+        """Extract the step interval from a cron minute field.
+
+        Supports ``*/N`` and ``start/step`` forms. Range expressions like
+        ``5-30/10`` are not currently handled and will return None.
+        """
         text = minute_field.strip()
         if text.startswith("*/") and text[2:].isdigit():
             return int(text[2:])

@@ -3,13 +3,19 @@ SQLite 连接与 schema 初始化。
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 from src.infrastructure.persistence.storage_names import DEFAULT_DATABASE_PATH
+
+logger = logging.getLogger(__name__)
+
+_VALID_COLUMN_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 BUSY_TIMEOUT_MS = 5000
@@ -129,6 +135,7 @@ def _prepare_database_file(path: str) -> None:
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
+    # foreign_keys is enabled for forward-compat; current schema has no FK constraints
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
 
@@ -143,7 +150,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_ALLOWED_COLUMN_TYPES = frozenset({"TEXT", "INTEGER", "REAL", "BLOB", "INTEGER DEFAULT 10"})
+
+
 def _ensure_tasks_column(conn: sqlite3.Connection, column_name: str, column_type: str) -> None:
+    if not _VALID_COLUMN_NAME_RE.match(column_name):
+        raise ValueError(f"Invalid column name: {column_name}")
+    if column_type not in _ALLOWED_COLUMN_TYPES:
+        raise ValueError(f"Disallowed column type: {column_type}")
     rows = conn.execute("PRAGMA table_info(tasks)").fetchall()
     existing_columns = {row["name"] for row in rows}
     if column_name in existing_columns:
@@ -151,6 +165,8 @@ def _ensure_tasks_column(conn: sqlite3.Connection, column_name: str, column_type
     conn.execute(f"ALTER TABLE tasks ADD COLUMN {column_name} {column_type}")
 
 
+# TODO: Add connection pooling for high-concurrency scenarios
+# TODO: Introduce a formal migration framework (e.g. alembic) for schema changes
 @contextmanager
 def sqlite_connection(
     db_path: str | None = None,

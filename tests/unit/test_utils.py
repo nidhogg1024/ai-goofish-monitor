@@ -11,8 +11,8 @@ from src.utils import (
 
 def test_safe_get_nested_and_default():
     data = {"a": {"b": [{"c": "value"}]}}
-    assert asyncio.run(safe_get(data, "a", "b", 0, "c")) == "value"
-    assert asyncio.run(safe_get(data, "a", "b", 1, "c", default="missing")) == "missing"
+    assert safe_get(data, "a", "b", 0, "c") == "value"
+    assert safe_get(data, "a", "b", 1, "c", default="missing") == "missing"
 
 
 def test_format_registration_days():

@@ -1,8 +1,11 @@
 """
 通知客户端工厂
 """
+from typing import List
+
 from src.infrastructure.config.settings import NotificationSettings
 
+from .base import NotificationClient
 from .bark_client import BarkClient
 from .gotify_client import GotifyClient
 from .ntfy_client import NtfyClient
@@ -11,7 +14,9 @@ from .wecom_bot_client import WeComBotClient
 from .webhook_client import WebhookClient
 
 
-def build_notification_clients(settings: NotificationSettings):
+# TODO: Replace hardcoded client list with a registry pattern to allow
+# dynamic registration of notification clients (e.g. via entry points).
+def build_notification_clients(settings: NotificationSettings) -> List[NotificationClient]:
     pcurl_to_mobile = settings.pcurl_to_mobile
     return [
         NtfyClient(settings.ntfy_topic_url, pcurl_to_mobile=pcurl_to_mobile),

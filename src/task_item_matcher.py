@@ -9,6 +9,7 @@ from typing import Any
 
 
 MODEL_TOKEN_RE = re.compile(r"(?<![a-z0-9])([a-z]{1,4}\d{1,4}[a-z]{0,4})(?![a-z0-9])", re.I)
+_MIN_MODEL_TOKEN_LEN = 3
 WORD_SPLIT_RE = re.compile(r"[\s,，、/|+()（）【】\\-]+")
 
 KNOWN_BRAND_ALIASES = {
@@ -31,7 +32,15 @@ GENERIC_STOPWORDS = {
     "国行",
 }
 
-ROBOT_VACUUM_STRONG_ACCESSORY_TERMS = (
+ROBOT_VACUUM_HARD_ACCESSORY_TERMS = (
+    "洗车液",
+    "主板",
+    "原拆件",
+    "拆机件",
+    "配件套装",
+)
+
+ROBOT_VACUUM_CONDITIONAL_ACCESSORY_TERMS = (
     "耗材",
     "边刷",
     "滤芯",
@@ -42,6 +51,7 @@ ROBOT_VACUUM_STRONG_ACCESSORY_TERMS = (
     "集尘袋",
     "清洁液",
     "海帕",
+    "上下水模块",
 )
 
 ROBOT_VACUUM_WRONG_FAMILY_TERMS = (
@@ -68,6 +78,30 @@ ROBOT_VACUUM_MACHINE_HINTS = (
     "扫拖一体",
 )
 
+ROBOT_VACUUM_WHOLE_MACHINE_HINTS = (
+    "机器人",
+    "扫地机器人",
+    "扫拖",
+    "扫拖一体",
+    "主机+基站",
+    "主机和基站",
+    "主机 基站",
+    "主机+基站一套",
+    "一套",
+    "套机",
+)
+
+MATCHER_CONFIG = {
+    "brand_aliases": KNOWN_BRAND_ALIASES,
+    "generic_stopwords": GENERIC_STOPWORDS,
+    "robot_vacuum_hard_accessory_terms": ROBOT_VACUUM_HARD_ACCESSORY_TERMS,
+    "robot_vacuum_conditional_accessory_terms": ROBOT_VACUUM_CONDITIONAL_ACCESSORY_TERMS,
+    "robot_vacuum_wrong_family_terms": ROBOT_VACUUM_WRONG_FAMILY_TERMS,
+    "robot_vacuum_broken_machine_terms": ROBOT_VACUUM_BROKEN_MACHINE_TERMS,
+    "robot_vacuum_machine_hints": ROBOT_VACUUM_MACHINE_HINTS,
+    "robot_vacuum_whole_machine_hints": ROBOT_VACUUM_WHOLE_MACHINE_HINTS,
+}
+
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").lower().split())
@@ -93,6 +127,8 @@ def _extract_model_tokens(keyword: str) -> list[str]:
     tokens: list[str] = []
     for match in MODEL_TOKEN_RE.finditer(compact):
         token = match.group(1).lower()
+        if len(token) < _MIN_MODEL_TOKEN_LEN:
+            continue
         if token in seen:
             continue
         seen.add(token)
@@ -141,15 +177,37 @@ def _build_match_text(item_data: dict) -> str:
 def _keyword_suggests_robot_vacuum(task_config: dict) -> bool:
     category = _normalize_text(task_config.get("category") or "")
     group_name = _normalize_text(task_config.get("group_name") or "")
+    task_name = _normalize_text(task_config.get("task_name") or "")
     keyword = _normalize_text(task_config.get("keyword") or "")
     description = _normalize_text(task_config.get("description") or "")
-    combined = " ".join([category, group_name, keyword, description])
+    combined = " ".join([category, group_name, task_name, keyword, description])
     markers = ("扫地", "扫拖", "机器人", "基站", "机械臂")
     return any(marker in combined for marker in markers)
 
 
-def match_task_item(task_config: dict, item_data: dict) -> tuple[bool, str]:
+def _build_reference_keyword(task_config: dict) -> str:
+    task_name = str(task_config.get("task_name") or "").strip()
     keyword = str(task_config.get("keyword") or "").strip()
+    if task_name and keyword:
+        return f"{task_name} {keyword}"
+    return task_name or keyword
+
+
+def _has_whole_machine_context(match_text: str, compact_text: str) -> bool:
+    if any(hint in match_text for hint in ROBOT_VACUUM_WHOLE_MACHINE_HINTS):
+        return True
+    compact_hints = (
+        "主机+基站",
+        "主机和基站",
+        "主机基站",
+        "机器人+基站",
+        "机器人基站",
+    )
+    return any(hint.replace(" ", "") in compact_text for hint in compact_hints)
+
+
+def match_task_item(task_config: dict, item_data: dict) -> tuple[bool, str]:
+    keyword = _build_reference_keyword(task_config)
     if not keyword:
         return True, "任务未配置关键词，跳过硬过滤。"
 
@@ -164,12 +222,16 @@ def match_task_item(task_config: dict, item_data: dict) -> tuple[bool, str]:
         for term in ROBOT_VACUUM_BROKEN_MACHINE_TERMS:
             if term in match_text:
                 return False, f"命中扫地机器人残缺机型词：{term}"
-        for term in ROBOT_VACUUM_STRONG_ACCESSORY_TERMS:
+        for term in ROBOT_VACUUM_HARD_ACCESSORY_TERMS:
             if term in match_text:
                 return False, f"命中扫地机器人配件词：{term}"
-        if "适配" in match_text or "通用" in match_text:
+        has_whole_machine_context = _has_whole_machine_context(match_text, compact_text)
+        for term in ROBOT_VACUUM_CONDITIONAL_ACCESSORY_TERMS:
+            if term in match_text and not has_whole_machine_context:
+                return False, f"命中扫地机器人配件词：{term}"
+        if ("适配" in match_text or "通用" in match_text) and not has_whole_machine_context:
             return False, "命中扫地机器人配件词：适配/通用"
-        if "配件" in match_text and not any(hint in match_text for hint in ROBOT_VACUUM_MACHINE_HINTS):
+        if "配件" in match_text and not has_whole_machine_context and not any(hint in match_text for hint in ROBOT_VACUUM_MACHINE_HINTS):
             return False, "命中扫地机器人配件词：配件"
 
     brand_groups = _extract_brand_alias_groups(keyword)

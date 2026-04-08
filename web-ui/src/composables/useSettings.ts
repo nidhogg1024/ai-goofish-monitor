@@ -20,8 +20,12 @@ function loadCachedModels(): { models: string[]; source: string } | null {
     const raw = localStorage.getItem(MODELS_CACHE_KEY)
     if (!raw) return null
     const data = JSON.parse(raw)
-    if (Date.now() - (data.ts || 0) > CACHE_TTL_MS) return null
-    return { models: data.models || [], source: data.source || '' }
+    if (Date.now() - (data.ts || 0) > CACHE_TTL_MS) {
+      localStorage.removeItem(MODELS_CACHE_KEY)
+      return null
+    }
+    if (!Array.isArray(data.models)) return null
+    return { models: data.models, source: data.source || '' }
   } catch { return null }
 }
 
@@ -34,8 +38,12 @@ function loadCachedProbe(): AiModelProbeItem[] {
     const raw = localStorage.getItem(PROBE_CACHE_KEY)
     if (!raw) return []
     const data = JSON.parse(raw)
-    if (Date.now() - (data.ts || 0) > CACHE_TTL_MS) return []
-    return data.items || []
+    if (Date.now() - (data.ts || 0) > CACHE_TTL_MS) {
+      localStorage.removeItem(PROBE_CACHE_KEY)
+      return []
+    }
+    if (!Array.isArray(data.items)) return []
+    return data.items
   } catch { return [] }
 }
 
@@ -55,9 +63,17 @@ export function useSettings() {
   
   const isLoading = ref(false)
   const isSaving = ref(false)
+  const savingKeys = ref<Set<string>>(new Set())
   const isLoadingAiModels = ref(false)
   const isProbingAiModels = ref(false)
   const error = ref<Error | null>(null)
+
+  function setSavingKey(key: string, active: boolean) {
+    const next = new Set(savingKeys.value)
+    if (active) next.add(key)
+    else next.delete(key)
+    savingKeys.value = next
+  }
 
   function buildAiModelLookupPayload(overrides?: Partial<AiSettings>): AiModelListRequest {
     const source = { ...aiSettings.value, ...(overrides || {}) }
@@ -168,6 +184,7 @@ export function useSettings() {
 
   async function saveNotificationSettings(payload: NotificationSettingsUpdate) {
     isSaving.value = true
+    setSavingKey('notifications', true)
     try {
       await settingsApi.updateNotificationSettings(payload)
       const [notif, status] = await Promise.all([
@@ -181,6 +198,7 @@ export function useSettings() {
       throw e
     } finally {
       isSaving.value = false
+      setSavingKey('notifications', false)
     }
   }
 
@@ -201,6 +219,7 @@ export function useSettings() {
 
   async function saveAiSettings() {
     isSaving.value = true
+    setSavingKey('ai', true)
     try {
       const payload = { ...aiSettings.value }
       const apiKey = (payload.OPENAI_API_KEY || '').trim()
@@ -219,11 +238,13 @@ export function useSettings() {
       throw e
     } finally {
       isSaving.value = false
+      setSavingKey('ai', false)
     }
   }
 
   async function saveRotationSettings() {
     isSaving.value = true
+    setSavingKey('rotation', true)
     try {
       await settingsApi.updateRotationSettings(rotationSettings.value)
     } catch (e) {
@@ -231,6 +252,7 @@ export function useSettings() {
       throw e
     } finally {
       isSaving.value = false
+      setSavingKey('rotation', false)
     }
   }
 
@@ -266,6 +288,7 @@ export function useSettings() {
     systemStatus,
     isLoading,
     isSaving,
+    savingKeys,
     isLoadingAiModels,
     isProbingAiModels,
     isReady,

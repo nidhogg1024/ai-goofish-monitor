@@ -1,14 +1,22 @@
 """
 登录状态管理路由
 """
-import os
+import asyncio
 import json
+import logging
+import os
+
 import aiofiles
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from src.infrastructure.config.settings import scraper_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/login-state", tags=["login-state"])
+
+STATE_FILE = scraper_settings.state_file
 
 
 class LoginStateUpdate(BaseModel):
@@ -21,32 +29,32 @@ async def update_login_state(
     data: LoginStateUpdate,
 ):
     """接收前端发送的登录状态JSON字符串，并保存到 xianyu_state.json"""
-    state_file = "xianyu_state.json"
-
     try:
-        # 验证是否是有效的JSON
-        json.loads(data.content)
+        parsed = json.loads(data.content)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="提供的内容不是有效的JSON格式。")
 
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="登录状态必须是JSON对象。")
+
     try:
-        async with aiofiles.open(state_file, 'w', encoding='utf-8') as f:
+        async with aiofiles.open(STATE_FILE, 'w', encoding='utf-8') as f:
             await f.write(data.content)
-        return {"message": f"登录状态文件 '{state_file}' 已成功更新。"}
+        return {"message": f"登录状态文件 '{STATE_FILE}' 已成功更新。"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"写入登录状态文件时出错: {e}")
+        logger.exception("写入登录状态文件时出错: %s", e)
+        raise HTTPException(status_code=500, detail="写入登录状态文件时出错")
 
 
 @router.delete("", response_model=dict)
 async def delete_login_state():
-    """删除 xianyu_state.json 文件"""
-    state_file = "xianyu_state.json"
-
-    if os.path.exists(state_file):
+    """删除登录状态文件"""
+    if os.path.exists(STATE_FILE):
         try:
-            os.remove(state_file)
+            await asyncio.to_thread(os.remove, STATE_FILE)
             return {"message": "登录状态文件已成功删除。"}
         except OSError as e:
-            raise HTTPException(status_code=500, detail=f"删除登录状态文件时出错: {e}")
+            logger.warning("删除登录状态文件时出错: %s", e)
+            raise HTTPException(status_code=500, detail="删除登录状态文件时出错")
 
     return {"message": "登录状态文件不存在，无需删除。"}

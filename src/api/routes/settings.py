@@ -1,7 +1,12 @@
 """
 设置管理路由
+
+TODO: This file is ~580 lines and should be split into separate modules
+(ai_settings, notification_settings, rotation_settings, system_status)
+in a future refactoring pass.
 """
 import asyncio
+import logging
 import os
 import time
 from typing import Optional
@@ -13,6 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from src.api.dependencies import get_execution_queue_service, get_process_service
+
+logger = logging.getLogger(__name__)
 from src.infrastructure.config.env_manager import env_manager
 from src.infrastructure.config.settings import (
     AISettings,
@@ -54,11 +61,14 @@ AI_MODEL_PROBE_CACHE_TTL_SECONDS = 600
 AI_MODEL_PROBE_CONCURRENCY = 2
 
 _AI_MODEL_PROBE_CACHE: dict[tuple[str, str], dict] = {}
+_probe_cache_lock = asyncio.Lock()
+_reload_env_lock = asyncio.Lock()
 
 
-def _reload_env() -> None:
-    load_dotenv(dotenv_path=env_manager.env_file, override=True)
-    reload_settings()
+async def _reload_env() -> None:
+    async with _reload_env_lock:
+        load_dotenv(dotenv_path=env_manager.env_file, override=True)
+        reload_settings()
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -145,21 +155,23 @@ def _extract_model_ids(payload: object) -> list[str]:
     return model_ids
 
 
-def _cache_probe_result(base_url: str, model: str, result: dict) -> None:
-    _AI_MODEL_PROBE_CACHE[(base_url, model)] = {
-        **result,
-        "cached_at": time.time(),
-    }
+async def _cache_probe_result(base_url: str, model: str, result: dict) -> None:
+    async with _probe_cache_lock:
+        _AI_MODEL_PROBE_CACHE[(base_url, model)] = {
+            **result,
+            "cached_at": time.time(),
+        }
 
 
-def _get_cached_probe_result(base_url: str, model: str) -> dict | None:
-    cached = _AI_MODEL_PROBE_CACHE.get((base_url, model))
-    if not cached:
-        return None
-    if time.time() - float(cached.get("cached_at", 0)) > AI_MODEL_PROBE_CACHE_TTL_SECONDS:
-        _AI_MODEL_PROBE_CACHE.pop((base_url, model), None)
-        return None
-    return dict(cached)
+async def _get_cached_probe_result(base_url: str, model: str) -> dict | None:
+    async with _probe_cache_lock:
+        cached = _AI_MODEL_PROBE_CACHE.get((base_url, model))
+        if not cached:
+            return None
+        if time.time() - float(cached.get("cached_at", 0)) > AI_MODEL_PROBE_CACHE_TTL_SECONDS:
+            _AI_MODEL_PROBE_CACHE.pop((base_url, model), None)
+            return None
+        return dict(cached)
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -193,8 +205,9 @@ def _run_ai_test_request(
     messages = [{"role": "user", "content": AI_TEST_PROMPT}]
     api_mode = CHAT_COMPLETIONS_API_MODE
     rate_limit_retries = 0
+    max_iterations = 10
 
-    while True:
+    for _attempt in range(max_iterations):
         try:
             response = create_ai_response_sync(
                 client,
@@ -228,6 +241,7 @@ def _run_ai_test_request(
                 "success": False,
                 "message": f"AI模型连接测试失败: {exc}",
             }
+    return {"success": False, "message": "AI模型连接测试超出最大重试次数。"}
 
 
 class NotificationSettingsModel(BaseModel):
@@ -324,7 +338,7 @@ async def update_notification_settings(settings: NotificationSettingsModel):
     if not success:
         raise HTTPException(status_code=500, detail="更新通知设置失败")
 
-    _reload_env()
+    await _reload_env()
     return {
         "message": "通知设置已成功更新",
         "configured_channels": build_configured_channels(merged_settings),
@@ -394,7 +408,7 @@ async def update_rotation_settings(settings: RotationSettingsModel):
     success = env_manager.update_values(updates)
     if not success:
         raise HTTPException(status_code=500, detail="更新轮换设置失败")
-    _reload_env()
+    await _reload_env()
     return {"message": "轮换设置已成功更新"}
 
 
@@ -467,18 +481,18 @@ async def update_ai_settings(settings: AISettingsModel):
     success = env_manager.update_values(updates)
     if not success:
         raise HTTPException(status_code=500, detail="更新AI设置失败")
-    _reload_env()
+    await _reload_env()
     return {"message": "AI设置已成功更新"}
 
 
 @router.post("/ai/test")
-async def test_ai_settings(settings: dict):
+async def test_ai_settings(settings: AISettingsModel):
     """测试AI模型设置是否有效"""
-    api_key = _resolve_ai_value(settings.get("OPENAI_API_KEY"), "OPENAI_API_KEY")
-    base_url = _resolve_ai_value(settings.get("OPENAI_BASE_URL"), "OPENAI_BASE_URL")
-    proxy_url = _resolve_ai_value(settings.get("PROXY_URL"), "PROXY_URL")
+    api_key = _resolve_ai_value(settings.OPENAI_API_KEY, "OPENAI_API_KEY")
+    base_url = _resolve_ai_value(settings.OPENAI_BASE_URL, "OPENAI_BASE_URL")
+    proxy_url = _resolve_ai_value(settings.PROXY_URL, "PROXY_URL")
     model_name = (
-        str(settings.get("OPENAI_MODEL_NAME") or "").strip()
+        str(settings.OPENAI_MODEL_NAME or "").strip()
         or env_manager.get_value("OPENAI_MODEL_NAME", "")
     )
     return _run_ai_test_request(
@@ -549,7 +563,7 @@ async def probe_ai_models(payload: AIModelProbeRequest):
 
     async def _probe_one(model_name: str) -> AIModelProbeItem:
         if not payload.force_refresh:
-            cached = _get_cached_probe_result(base_url, model_name)
+            cached = await _get_cached_probe_result(base_url, model_name)
             if cached:
                 return AIModelProbeItem(
                     model=model_name,
@@ -572,7 +586,7 @@ async def probe_ai_models(payload: AIModelProbeRequest):
             "message": str(result["message"]),
             "checked_at": _utc_timestamp(),
         }
-        _cache_probe_result(base_url, model_name, item)
+        await _cache_probe_result(base_url, model_name, item)
         return AIModelProbeItem(model=model_name, cached=False, **item)
 
     items = await asyncio.gather(*[_probe_one(model_name) for model_name in models])

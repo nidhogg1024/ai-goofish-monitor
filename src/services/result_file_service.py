@@ -1,6 +1,8 @@
 """
 结果记录富化与文件名校验服务
 """
+import asyncio
+import logging
 
 from src.infrastructure.persistence.storage_names import normalize_keyword_from_filename
 from src.services.price_history_service import (
@@ -9,14 +11,16 @@ from src.services.price_history_service import (
     parse_price_value,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def validate_result_filename(filename: str) -> None:
-    if not filename.endswith(".jsonl") or "/" in filename or ".." in filename:
+    if not filename.endswith(".jsonl") or "/" in filename or "\\" in filename or ".." in filename:
         raise ValueError("无效的文件名")
 
 
-def enrich_records_with_price_insight(records: list[dict], filename: str) -> list[dict]:
-    snapshots = load_price_snapshots(normalize_keyword_from_filename(filename))
+async def enrich_records_with_price_insight(records: list[dict], filename: str) -> list[dict]:
+    snapshots = await asyncio.to_thread(load_price_snapshots, normalize_keyword_from_filename(filename))
     if not snapshots:
         return records
 

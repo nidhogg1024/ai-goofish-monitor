@@ -53,7 +53,7 @@ const options = computed<FileOption[]>(() => {
 const selectedLabel = computed(() => {
   if (!props.isReady) return t('results.filters.loadingTaskNames')
   if (options.value.length === 0) return t('results.filters.noResults')
-  if (!props.selectedTaskName) return '全部任务'
+  if (!props.selectedTaskName) return t('results.filters.allTasks')
   const activeOptions = props.taskOptions && props.taskOptions.length > 0 ? props.taskOptions : options.value
   const match = activeOptions.find((option) => option.taskName === props.selectedTaskName)
   return match ? match.label : t('results.filters.taskNameLabel', { task: t('common.unnamed') })
@@ -114,7 +114,7 @@ function handleToggleKeywordRecommended(value: boolean) {
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="__all__">全部分类</SelectItem>
+          <SelectItem value="__all__">{{ t('results.filters.allCategories') }}</SelectItem>
           <SelectItem v-for="category in props.categoryOptions || []" :key="category" :value="category">
             {{ category }}
           </SelectItem>
@@ -129,7 +129,7 @@ function handleToggleKeywordRecommended(value: boolean) {
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="__all__">全部任务组</SelectItem>
+          <SelectItem value="__all__">{{ t('results.filters.allGroups') }}</SelectItem>
           <SelectItem v-for="group in props.groupOptions || []" :key="group" :value="group">
             {{ group }}
           </SelectItem>
@@ -144,7 +144,7 @@ function handleToggleKeywordRecommended(value: boolean) {
           <span :class="labelClass">{{ selectedLabel }}</span>
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="__all__">全部任务</SelectItem>
+          <SelectItem value="__all__">{{ t('results.filters.allTasks') }}</SelectItem>
           <SelectItem v-for="option in props.taskOptions || options" :key="option.value" :value="option.taskName || option.value">
             {{ option.label }}
           </SelectItem>

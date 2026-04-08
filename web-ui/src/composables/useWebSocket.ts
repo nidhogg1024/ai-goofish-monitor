@@ -16,7 +16,7 @@ export function useWebSocket() {
    * @param event The event name (e.g., 'tasks_updated')
    * @param callback The function to call when the event is received
    */
-  function on(event: string, callback: (data: any) => void) {
+  function on(event: string, callback: (data: unknown) => void) {
     wsService.on(event, callback)
     
     // Clean up when the scope (component) is disposed

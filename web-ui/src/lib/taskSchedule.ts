@@ -1,4 +1,5 @@
 import { t } from '@/i18n'
+import type { Task } from '@/types/task.d.ts'
 
 const SECOND_MS = 1000
 const MINUTE_MS = 60 * SECOND_MS
@@ -40,4 +41,14 @@ export function formatCountdown(
   if (hours > 0) return t('time.countdownHours', { hours, minutes, seconds })
   if (minutes > 0) return t('time.countdownMinutes', { minutes, seconds })
   return t('time.countdownSeconds', { seconds })
+}
+
+export function canStartTask(task: Task): boolean {
+  return (
+    task.enabled &&
+    !task.is_running &&
+    !task.is_queued &&
+    task.execution_state !== 'queued' &&
+    task.execution_state !== 'running'
+  )
 }

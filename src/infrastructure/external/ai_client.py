@@ -2,10 +2,13 @@
 AI 客户端封装
 提供统一的 AI 调用接口
 """
+import logging
 import os
 import json
 import base64
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -126,7 +129,7 @@ class AIClient:
 
         try:
             messages = self._build_messages(product_data, image_paths, prompt_text)
-            response = await self._call_ai(messages)
+            response = await self.call_ai(messages)
             return self._parse_response(response)
         except Exception as e:
             print(f"AI 分析失败: {e}")
@@ -149,7 +152,7 @@ class AIClient:
         user_content = build_user_message_content(text_prompt, image_data_urls)
         return [{"role": "user", "content": user_content}]
 
-    async def _call_ai(
+    async def call_ai(
         self,
         messages: List[Dict],
         *,
@@ -218,7 +221,7 @@ class AIClient:
                     use_stream = True
                     mark_stream_required()
                     changed = True
-                    print("当前网关要求 stream=true，后续所有请求将自动启用流式模式")
+                    logger.info("当前网关要求 stream=true，后续所有请求将自动启用流式模式")
                 if use_response_format and is_json_output_unsupported_error(exc):
                     use_response_format = False
                     changed = True
@@ -232,6 +235,8 @@ class AIClient:
                 raise
 
         raise RuntimeError("AI 调用在兼容性重试后仍未返回结果")
+
+    _call_ai = call_ai
 
     def _parse_response(self, response_text: str) -> Optional[Dict]:
         """解析 AI 响应"""

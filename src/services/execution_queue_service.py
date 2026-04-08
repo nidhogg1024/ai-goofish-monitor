@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from src.infrastructure.config.settings import settings as app_settings
 from src.services.process_service import ProcessService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -41,7 +44,7 @@ class ExecutionQueueService:
                 asyncio.create_task(self._worker_loop(index), name=f"execution-queue-worker-{index + 1}")
                 for index in range(self.worker_count)
             ]
-            print(f"执行队列已启动，worker 数量: {self.worker_count}")
+            logger.info("执行队列已启动，worker 数量: %d", self.worker_count)
 
     async def stop(self) -> None:
         async with self._lock:
@@ -58,32 +61,45 @@ class ExecutionQueueService:
 
         self.pending_task_ids.clear()
         self.active_task_ids.clear()
-        print("执行队列已停止")
+        logger.info("执行队列已停止")
 
     async def enqueue_task(self, task_id: int, task_name: str, *, source: str = "scheduler") -> bool:
         async with self._lock:
             if self.process_service.is_running(task_id):
-                print(f"执行队列: 任务 '{task_name}' 已在运行中，跳过重复入队")
+                logger.debug("执行队列: 任务 '%s' 已在运行中，跳过重复入队", task_name)
                 return False
             if task_id in self.pending_task_ids or task_id in self.active_task_ids:
-                print(f"执行队列: 任务 '{task_name}' 已在队列中，跳过重复入队")
+                logger.debug("执行队列: 任务 '%s' 已在队列中，跳过重复入队", task_name)
                 return False
 
             self.pending_task_ids.add(task_id)
         await self.queue.put(QueueTask(task_id=task_id, task_name=task_name, source=source))
-        print(f"执行队列: 任务 '{task_name}' 已入队，来源: {source}，当前排队数: {self.queue_size}")
+        logger.info("执行队列: 任务 '%s' 已入队，来源: %s，当前排队数: %d", task_name, source, self.queue_size)
         return True
 
     def cancel_task(self, task_id: int) -> bool:
+        """从待执行集合中移除任务。
+
+        NOTE: 由于 asyncio.Queue 不支持按值删除，已入队的 QueueTask 仍会
+        被 worker 取出，但 worker 会在发现 task_id 不在 pending_task_ids 后
+        立即跳过，因此实际不会执行。
+        """
         if task_id in self.pending_task_ids:
             self.pending_task_ids.discard(task_id)
-            print(f"执行队列: 已取消任务 ID {task_id} 的排队状态")
+            logger.info("执行队列: 已取消任务 ID %d 的排队状态", task_id)
             return True
         return False
 
     @property
     def queue_size(self) -> int:
+        """返回实际待执行的任务数（不含已取消但仍在 Queue 中的条目）。"""
         return len(self.pending_task_ids)
+
+    def is_task_pending(self, task_id: int) -> bool:
+        return task_id in self.pending_task_ids
+
+    def is_task_active(self, task_id: int) -> bool:
+        return task_id in self.active_task_ids
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -108,15 +124,15 @@ class ExecutionQueueService:
             self.pending_task_ids.discard(item.task_id)
             self.active_task_ids.add(item.task_id)
             try:
-                print(
-                    f"执行队列 worker-{worker_index + 1}: 开始执行任务 '{item.task_name}' "
-                    f"(来源: {item.source})"
+                logger.info(
+                    "执行队列 worker-%d: 开始执行任务 '%s' (来源: %s)",
+                    worker_index + 1, item.task_name, item.source,
                 )
                 started = await self.process_service.start_task(item.task_id, item.task_name)
                 if started:
                     await self.process_service.wait_for_task_exit(item.task_id)
             except Exception as exc:
-                print(f"执行队列 worker-{worker_index + 1}: 执行任务 '{item.task_name}' 失败: {exc}")
+                logger.error("执行队列 worker-%d: 执行任务 '%s' 失败: %s", worker_index + 1, item.task_name, exc)
             finally:
                 self.active_task_ids.discard(item.task_id)
                 self.queue.task_done()

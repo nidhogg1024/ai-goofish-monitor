@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import median
 from typing import Any, Iterable, Optional
 
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_connection import sqlite_connection
+
+logger = logging.getLogger(__name__)
 
 PRICE_HISTORY_DIR = "price_history"
 DEFAULT_HISTORY_WINDOW_DAYS = 30
@@ -124,34 +127,37 @@ def record_market_snapshots(
 
     bootstrap_sqlite_storage()
     keyword_slug = normalize_keyword_slug(keyword)
+    rows = [
+        (
+            keyword_slug,
+            record.get("keyword", keyword),
+            record.get("task_name", task_name),
+            record.get("snapshot_time", snapshot_time),
+            record.get("snapshot_day", _to_day(snapshot_time)),
+            record.get("run_id", run_id),
+            record.get("item_id", ""),
+            record.get("title", ""),
+            record.get("price"),
+            record.get("price_display", ""),
+            json.dumps(record.get("tags") or [], ensure_ascii=False),
+            record.get("region", ""),
+            record.get("seller", ""),
+            record.get("publish_time", ""),
+            record.get("link", ""),
+        )
+        for record in records
+    ]
     with sqlite_connection() as conn:
-        for record in records:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO price_snapshots (
-                    keyword_slug, keyword, task_name, snapshot_time, snapshot_day,
-                    run_id, item_id, title, price, price_display, tags_json, region,
-                    seller, publish_time, link
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    keyword_slug,
-                    record.get("keyword", keyword),
-                    record.get("task_name", task_name),
-                    record.get("snapshot_time", snapshot_time),
-                    record.get("snapshot_day", _to_day(snapshot_time)),
-                    record.get("run_id", run_id),
-                    record.get("item_id", ""),
-                    record.get("title", ""),
-                    record.get("price"),
-                    record.get("price_display", ""),
-                    json.dumps(record.get("tags") or [], ensure_ascii=False),
-                    record.get("region", ""),
-                    record.get("seller", ""),
-                    record.get("publish_time", ""),
-                    record.get("link", ""),
-                ),
-            )
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO price_snapshots (
+                keyword_slug, keyword, task_name, snapshot_time, snapshot_day,
+                run_id, item_id, title, price, price_display, tags_json, region,
+                seller, publish_time, link
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
         conn.commit()
     return records
 
@@ -161,7 +167,9 @@ def load_price_snapshots(keyword: str) -> list[dict]:
     with sqlite_connection() as conn:
         rows = conn.execute(
             """
-            SELECT *
+            SELECT id, keyword_slug, keyword, task_name, snapshot_time, snapshot_day,
+                   run_id, item_id, title, price, price_display, tags_json, region,
+                   seller, publish_time, link
             FROM price_snapshots
             WHERE keyword_slug = ?
             ORDER BY snapshot_time ASC, id ASC
@@ -247,14 +255,21 @@ def _build_daily_trend(snapshots: list[dict]) -> list[dict]:
     return points
 
 
+def _safe_fromisoformat(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    return datetime.fromisoformat(normalized)
+
+
 def _recent_window_snapshots(snapshots: list[dict], window_days: int) -> list[dict]:
     if not snapshots:
         return []
     latest_time = max(str(record.get("snapshot_time") or "") for record in snapshots)
-    latest_dt = datetime.fromisoformat(latest_time)
+    latest_dt = _safe_fromisoformat(latest_time)
     filtered = []
     for record in snapshots:
-        current_time = datetime.fromisoformat(str(record.get("snapshot_time") or latest_time))
+        current_time = _safe_fromisoformat(str(record.get("snapshot_time") or latest_time))
         if (latest_dt - current_time).days <= max(0, window_days):
             filtered.append(record)
     return filtered
@@ -296,7 +311,8 @@ def build_item_price_context(
     market_median = market_summary.get("median_price")
 
     score = 50
-    if price_now is not None and market_avg:
+    min_market_sample = 3
+    if price_now is not None and market_avg and market_summary.get("sample_count", 0) >= min_market_sample:
         score += int(((market_avg - price_now) / market_avg) * 60)
     if price_now is not None and historical_prices:
         historical_max = max(historical_prices)

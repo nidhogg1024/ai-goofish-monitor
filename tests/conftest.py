@@ -16,7 +16,9 @@ sys.path.insert(0, str(repo_root))
 
 from src.api import dependencies as deps
 from src.api.routes import tasks
+from src.infrastructure.persistence.sqlite_bootstrap import reset_bootstrap_state
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+import src.services.result_storage_service as _result_storage_mod
 from src.services.task_service import TaskService
 from src.services.task_generation_service import TaskGenerationService
 
@@ -28,6 +30,16 @@ def _reset_stream_required_state():
     original = compat._stream_required
     yield
     compat._stream_required = original
+
+
+@pytest.fixture(autouse=True)
+def _reset_bootstrap_state():
+    """Prevent bootstrap_sqlite_storage global flag from leaking between tests."""
+    reset_bootstrap_state()
+    _result_storage_mod._storage_bootstrapped = False
+    yield
+    reset_bootstrap_state()
+    _result_storage_mod._storage_bootstrapped = False
 
 
 @pytest.fixture()
@@ -115,6 +127,12 @@ class FakeExecutionQueueService:
         self.cancelled = []
         self.pending_task_ids = set()
         self.active_task_ids = set()
+
+    def is_task_pending(self, task_id: int) -> bool:
+        return task_id in self.pending_task_ids
+
+    def is_task_active(self, task_id: int) -> bool:
+        return task_id in self.active_task_ids
 
     async def enqueue_task(self, task_id: int, task_name: str, *, source: str = "scheduler") -> bool:
         if task_id in self.pending_task_ids or task_id in self.active_task_ids:
@@ -205,4 +223,5 @@ def api_context(tmp_path):
 
 @pytest.fixture()
 def api_client(api_context):
-    return TestClient(api_context["app"])
+    with TestClient(api_context["app"]) as client:
+        yield client

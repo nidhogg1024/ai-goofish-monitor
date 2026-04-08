@@ -1,15 +1,25 @@
-import { useAuth } from '@/composables/useAuth'
+type LogoutCallback = () => void
+let _onUnauthorized: LogoutCallback | null = null
+
+export function setHttpUnauthorizedHandler(cb: LogoutCallback) {
+  _onUnauthorized = cb
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000
 
 interface FetchOptions extends RequestInit {
   params?: Record<string, string | number | boolean | undefined>;
+  timeoutMs?: number;
 }
 
 export async function http(url: string, options: FetchOptions = {}) {
-  const { logout } = useAuth()
-  
   const headers = new Headers(options.headers)
 
-  // Handle Query Params
+  const csrfToken = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content
+  if (csrfToken) {
+    headers.set('X-CSRF-Token', csrfToken)
+  }
+
   let fullUrl = url
   if (options.params) {
     const searchParams = new URLSearchParams()
@@ -24,17 +34,30 @@ export async function http(url: string, options: FetchOptions = {}) {
     }
   }
 
+  const controller = new AbortController()
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
   const config: RequestInit = {
     ...options,
     headers,
+    signal: controller.signal,
   }
 
-  const response = await fetch(fullUrl, config)
+  let response: Response
+  try {
+    response = await fetch(fullUrl, config)
+  } catch (e) {
+    if ((e as DOMException)?.name === 'AbortError') {
+      throw new Error(`Request timeout after ${timeoutMs}ms`)
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
 
   if (response.status === 401) {
-    // Basic Auth failed or session expired
-    logout()
-    // Optional: Redirect to login handled by router or state change
+    _onUnauthorized?.()
     throw new Error('Unauthorized')
   }
 
@@ -43,7 +66,6 @@ export async function http(url: string, options: FetchOptions = {}) {
     throw new Error(errorData.detail || `HTTP error! status: ${response.status}`)
   }
 
-  // Handle 204 No Content
   if (response.status === 204) {
     return null
   }

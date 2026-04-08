@@ -52,7 +52,7 @@ const latestSnapshotText = computed(() => {
     <div class="grid gap-6 px-5 py-4 lg:grid-cols-[1.15fr_0.85fr] lg:px-6">
       <div class="space-y-4">
         <div class="space-y-1">
-          <p class="text-[10px] uppercase tracking-[0.28em] text-primary/70">Market Intelligence</p>
+          <p class="text-[10px] uppercase tracking-[0.28em] text-primary/70">{{ t('results.insights.marketIntelligence') }}</p>
           <h2 class="text-xl font-semibold text-slate-900">
             {{ selectedTaskLabel || t('results.insights.defaultTitle') }}
           </h2>
@@ -78,7 +78,7 @@ const latestSnapshotText = computed(() => {
 
       <div class="space-y-3">
         <div class="rounded-2xl border border-primary/10 bg-gradient-to-br from-primary to-sky-700 p-4 text-primary-foreground shadow-[0_8px_24px_rgba(37,99,235,0.18)]">
-          <p class="text-[10px] uppercase tracking-[0.24em] text-primary-foreground/70">Trend Reading</p>
+          <p class="text-[10px] uppercase tracking-[0.24em] text-primary-foreground/70">{{ t('results.insights.trendReadingLabel') }}</p>
           <p class="mt-2 text-2xl font-semibold">
             {{ t('results.insights.snapshotCount', { count: insights?.market_summary.sample_count || 0 }) }}
           </p>
@@ -88,7 +88,7 @@ const latestSnapshotText = computed(() => {
         </div>
 
         <div class="app-surface-subtle p-4">
-          <p class="text-[10px] uppercase tracking-[0.2em] text-slate-500">Snapshot Note</p>
+          <p class="text-[10px] uppercase tracking-[0.2em] text-slate-500">{{ t('results.insights.snapshotNote') }}</p>
           <p class="mt-2 text-xs leading-5 text-slate-600">
             {{ latestSnapshotText }}
           </p>

@@ -19,9 +19,15 @@ const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
 
+const MIN_PASSWORD_LENGTH = 4
+
 async function handleLogin() {
   if (!username.value || !password.value) {
     error.value = t('login.errors.missingCredentials')
+    return
+  }
+  if (password.value.length < MIN_PASSWORD_LENGTH) {
+    error.value = t('login.errors.passwordTooShort', { min: MIN_PASSWORD_LENGTH })
     return
   }
 
@@ -38,6 +44,7 @@ async function handleLogin() {
       error.value = t('login.errors.invalidCredentials')
     }
   } catch (e) {
+    console.error('[LoginView] login error:', e)
     error.value = t('login.errors.unexpected')
   } finally {
     isLoading.value = false

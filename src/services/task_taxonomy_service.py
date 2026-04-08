@@ -6,28 +6,27 @@ from __future__ import annotations
 from typing import Any, Tuple
 
 
-ROBOT_VACUUM_MARKERS = (
-    "扫地机器人",
-    "扫拖机器人",
-    "科沃斯",
-    "追觅",
-    "云鲸",
-    "石头",
-    "mova",
-    "米家",
-    "小米",
-    "美的",
-    "基站",
-    "洗拖布",
-    "集尘",
-)
+CATEGORY_MARKERS: dict[str, tuple[str, ...]] = {
+    "扫地机器人": (
+        "扫地机器人", "扫拖机器人", "科沃斯", "追觅", "云鲸", "石头",
+        "mova", "米家", "小米", "美的", "基站", "洗拖布", "集尘",
+    ),
+    "手机数码": ("iphone", "安卓", "手机", "小米14", "荣耀", "华为", "vivo", "oppo"),
+    "相机影像": ("相机", "镜头", "索尼", "佳能", "尼康", "富士"),
+    "显卡硬件": ("显卡", "rtx", "rx", "矿卡", "nvidia", "amd"),
+    "游戏设备": ("switch", "ps5", "xbox", "掌机", "游戏机"),
+    "智能穿戴": ("apple watch", "手表", "watch s", "iwatch"),
+    "电脑整机": ("macbook", "笔记本", "thinkpad", "拯救者", "yoga"),
+}
 
-PHONE_MARKERS = ("iphone", "安卓", "手机", "小米14", "荣耀", "华为", "vivo", "oppo")
-CAMERA_MARKERS = ("相机", "镜头", "索尼", "佳能", "尼康", "富士")
-GPU_MARKERS = ("显卡", "rtx", "rx", "矿卡", "nvidia", "amd")
-GAME_MARKERS = ("switch", "ps5", "xbox", "掌机", "游戏机")
-WATCH_MARKERS = ("apple watch", "手表", "watch s", "iwatch")
-LAPTOP_MARKERS = ("macbook", "笔记本", "thinkpad", "拯救者", "yoga")
+SPECIAL_GROUP_RULES: list[dict[str, Any]] = [
+    {
+        "category": "扫地机器人",
+        "markers": ("租房", "单间", "三十多平", "38 平", "38平", "小户型"),
+        "extra_condition_markers": ("猫", "猫毛"),
+        "group_name": "租房两猫",
+    },
+]
 
 
 def _normalize_text(value: Any) -> str | None:
@@ -41,20 +40,9 @@ def infer_task_category(task_name: str | None, keyword: str | None, description:
     haystack = " ".join(
         part for part in [task_name or "", keyword or "", description or ""] if part
     ).lower()
-    if any(marker in haystack for marker in ROBOT_VACUUM_MARKERS):
-        return "扫地机器人"
-    if any(marker in haystack for marker in PHONE_MARKERS):
-        return "手机数码"
-    if any(marker in haystack for marker in CAMERA_MARKERS):
-        return "相机影像"
-    if any(marker in haystack for marker in GPU_MARKERS):
-        return "显卡硬件"
-    if any(marker in haystack for marker in GAME_MARKERS):
-        return "游戏设备"
-    if any(marker in haystack for marker in WATCH_MARKERS):
-        return "智能穿戴"
-    if any(marker in haystack for marker in LAPTOP_MARKERS):
-        return "电脑整机"
+    for category, markers in CATEGORY_MARKERS.items():
+        if any(marker in haystack for marker in markers):
+            return category
     return "通用监控"
 
 
@@ -69,12 +57,12 @@ def infer_task_group(
         part for part in [task_name or "", keyword or "", description or ""] if part
     ).lower()
 
-    if current_category == "扫地机器人":
-        if any(marker in haystack for marker in ("租房", "单间", "三十多平", "38 平", "38平", "小户型")) and (
-            "猫" in haystack or "猫毛" in haystack
-        ):
-            return "租房两猫"
-        return "扫地机器人关注池"
+    for rule in SPECIAL_GROUP_RULES:
+        if current_category == rule["category"]:
+            if any(m in haystack for m in rule["markers"]):
+                extra = rule.get("extra_condition_markers")
+                if not extra or any(m in haystack for m in extra):
+                    return rule["group_name"]
 
     return f"{current_category}关注池"
 

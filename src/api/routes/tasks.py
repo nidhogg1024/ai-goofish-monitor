@@ -1,11 +1,14 @@
 """
 任务管理路由
 """
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+import os
+
+import aiofiles
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from typing import List
-import os
-import aiofiles
+
 from src.api.dependencies import (
     get_execution_queue_service,
     get_process_service,
@@ -32,6 +35,9 @@ from src.services.account_strategy_service import normalize_account_strategy
 from src.infrastructure.persistence.storage_names import build_result_filename
 from src.services.price_history_service import delete_price_snapshots
 from src.services.result_storage_service import delete_result_file_records
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 async def _reload_scheduler_if_needed(
@@ -46,7 +52,8 @@ def _has_keyword_rules(rules) -> bool:
     return bool(rules and len(rules) > 0)
 
 
-def _validate_final_account_strategy(existing_task, task_update: TaskUpdate) -> None:
+def _validate_final_account_strategy(existing_task, task_update: TaskUpdate) -> str:
+    """Validate and return the resolved account_strategy without mutating task_update."""
     account_state_file = (
         task_update.account_state_file
         if task_update.account_state_file is not None
@@ -56,9 +63,9 @@ def _validate_final_account_strategy(existing_task, task_update: TaskUpdate) -> 
         task_update.account_strategy,
         account_state_file,
     )
-    task_update.account_strategy = account_strategy
     if account_strategy == "fixed" and not account_state_file:
         raise HTTPException(status_code=400, detail="固定账号模式下必须选择账号。")
+    return account_strategy
 @router.get("", response_model=List[dict])
 async def get_tasks(
     service: TaskService = Depends(get_task_service),
@@ -108,7 +115,7 @@ async def generate_task(
 ):
     """创建任务。AI模式会生成分析标准，关键词模式直接保存规则。"""
     req = await enrich_generate_request(req)
-    print(f"收到任务生成请求: {req.task_name}，模式: {req.decision_mode}")
+    logger.info("收到任务生成请求: %s，模式: %s", req.task_name, req.decision_mode)
 
     try:
         mode = req.decision_mode or "ai"
@@ -140,11 +147,8 @@ async def generate_task(
     except HTTPException:
         raise
     except Exception as e:
-        error_msg = f"AI任务生成API发生未知错误: {str(e)}"
-        print(error_msg)
-        import traceback
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=error_msg)
+        logger.exception("AI任务生成API发生未知错误: %s", e)
+        raise HTTPException(status_code=500, detail="AI任务生成失败，请稍后重试。")
 @router.get("/generate-jobs/{job_id}", response_model=dict)
 async def get_task_generation_job(
     job_id: str,
@@ -168,7 +172,7 @@ async def update_task(
         existing_task = await service.get_task(task_id)
         if not existing_task:
             raise HTTPException(status_code=404, detail="任务未找到")
-        _validate_final_account_strategy(existing_task, task_update)
+        task_update.account_strategy = _validate_final_account_strategy(existing_task, task_update)
 
         current_mode = getattr(existing_task, "decision_mode", "ai") or "ai"
         target_mode = task_update.decision_mode or current_mode
@@ -187,7 +191,7 @@ async def update_task(
             if not _has_keyword_rules(final_rules):
                 raise HTTPException(status_code=400, detail="关键词模式下至少需要一个关键词。")
         if target_mode == "ai" and (description_changed or switched_to_ai):
-            print(f"检测到任务 {task_id} 需要刷新 AI 标准文件，开始重新生成...")
+            logger.info("检测到任务 %s 需要刷新 AI 标准文件，开始重新生成...", task_id)
             try:
                 description_for_ai = (
                     task_update.description
@@ -201,30 +205,27 @@ async def update_task(
                     if c.isalnum() or c in "_-"
                 ).rstrip()
                 output_filename = f"prompts/{safe_keyword}_criteria.txt"
-                print(f"目标文件路径: {output_filename}")
-                print("开始调用 AI 生成新的分析标准...")
+                logger.debug("目标文件路径: %s", output_filename)
+                logger.info("开始调用 AI 生成新的分析标准...")
                 generated_criteria = await generate_criteria(
                     user_description=description_for_ai,
                     reference_file_path="prompts/macbook_criteria.txt"
                 )
                 if not generated_criteria or len(generated_criteria.strip()) == 0:
-                    print("AI 返回的内容为空")
+                    logger.warning("AI 返回的内容为空")
                     raise HTTPException(status_code=500, detail="AI 未能生成分析标准，返回内容为空。")
-                print(f"保存新的分析标准到: {output_filename}")
+                logger.info("保存新的分析标准到: %s", output_filename)
                 os.makedirs("prompts", exist_ok=True)
                 async with aiofiles.open(output_filename, 'w', encoding='utf-8') as f:
                     await f.write(generated_criteria)
-                print(f"新的分析标准已保存")
+                logger.info("新的分析标准已保存")
                 task_update.ai_prompt_criteria_file = output_filename
-                print(f"已更新 ai_prompt_criteria_file 字段为: {output_filename}")
+                logger.debug("已更新 ai_prompt_criteria_file 字段为: %s", output_filename)
             except HTTPException:
                 raise
             except Exception as e:
-                error_msg = f"重新生成 criteria 文件时出错: {str(e)}"
-                print(error_msg)
-                import traceback
-                print(traceback.format_exc())
-                raise HTTPException(status_code=500, detail=error_msg)
+                logger.exception("重新生成 criteria 文件时出错: %s", e)
+                raise HTTPException(status_code=500, detail="重新生成分析标准失败，请稍后重试。")
         task = await service.update_task(task_id, task_update)
         await _reload_scheduler_if_needed(service, scheduler_service)
         return {"message": "任务更新成功", "task": serialize_task(task, scheduler_service, execution_queue_service)}
@@ -259,14 +260,14 @@ async def delete_task(
                 await delete_result_file_records(build_result_filename(keyword))
                 delete_price_snapshots(keyword)
     except Exception as e:
-        print(f"删除任务结果文件时出错: {e}")
+        logger.warning("删除任务结果文件时出错: %s", e)
 
     try:
         log_file_path = resolve_task_log_path(task_id, task.task_name)
         if os.path.exists(log_file_path):
             os.remove(log_file_path)
     except Exception as e:
-        print(f"删除任务日志文件时出错: {e}")
+        logger.warning("删除任务日志文件时出错: %s", e)
     return {"message": "任务删除成功"}
 @router.post("/start/{task_id}", response_model=dict)
 async def start_task(

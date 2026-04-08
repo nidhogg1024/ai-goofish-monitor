@@ -34,7 +34,7 @@ def _replace_minute(expression: str, minute_expr: str) -> str:
 
 def _minute_candidates(minute_expr: str) -> list[int]:
     minute_expr = minute_expr.strip()
-    if minute_expr == "0":
+    if minute_expr in ("0", "*"):
         return list(range(60))
     if minute_expr.startswith("*/"):
         step = minute_expr[2:]
@@ -119,7 +119,8 @@ def assign_scattered_cron(
         return normalized
 
     template_expression = normalized or DEFAULT_AUTO_CRON
-    minute_expr = _split_cron_parts(template_expression)[0 if len(_split_cron_parts(template_expression)) == 5 else 1]
+    parts = _split_cron_parts(template_expression)
+    minute_expr = parts[0 if len(parts) == 5 else 1]
     candidates = _minute_candidates(minute_expr)
     if not candidates:
         return template_expression

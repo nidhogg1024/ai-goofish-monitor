@@ -12,7 +12,11 @@ load_dotenv()
 STATE_FILE = "xianyu_state.json"
 IMAGE_SAVE_DIR = "images"
 CONFIG_FILE = "config.json"
-os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
+
+
+def ensure_directories():
+    """Create required directories. Call before first use, not at import time."""
+    os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
 # 任务隔离的临时图片目录前缀
 TASK_IMAGE_DIR_PREFIX = "task_images_"
@@ -22,31 +26,70 @@ API_URL_PATTERN = "h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search"
 DETAIL_API_URL_PATTERN = "h5api.m.goofish.com/h5/mtop.taobao.idle.pc.detail"
 
 # --- Environment Variables ---
-API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))
-MODEL_NAME = os.getenv("OPENAI_MODEL_NAME")
-PROXY_URL = os.getenv("PROXY_URL")
-NTFY_TOPIC_URL = os.getenv("NTFY_TOPIC_URL")
-GOTIFY_URL = os.getenv("GOTIFY_URL")
-GOTIFY_TOKEN = os.getenv("GOTIFY_TOKEN")
-BARK_URL = os.getenv("BARK_URL")
-WX_BOT_URL = os.getenv("WX_BOT_URL")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_METHOD = os.getenv("WEBHOOK_METHOD", "POST").upper()
-WEBHOOK_HEADERS = os.getenv("WEBHOOK_HEADERS")
-WEBHOOK_CONTENT_TYPE = os.getenv("WEBHOOK_CONTENT_TYPE", "JSON").upper()
-WEBHOOK_QUERY_PARAMETERS = os.getenv("WEBHOOK_QUERY_PARAMETERS")
-WEBHOOK_BODY = os.getenv("WEBHOOK_BODY")
-PCURL_TO_MOBILE = os.getenv("PCURL_TO_MOBILE", "false").lower() == "true"
-RUN_HEADLESS = os.getenv("RUN_HEADLESS", "true").lower() != "false"
-LOGIN_IS_EDGE = os.getenv("LOGIN_IS_EDGE", "false").lower() == "true"
-RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
-AI_DEBUG_MODE = os.getenv("AI_DEBUG_MODE", "false").lower() == "true"
-SKIP_AI_ANALYSIS = os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true"
-ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() == "true"
-ENABLE_RESPONSE_FORMAT = os.getenv("ENABLE_RESPONSE_FORMAT", "true").lower() == "true"
+def _load_env_config() -> dict:
+    """Load configuration from environment variables.
+
+    Sensitive values (API keys, tokens) are loaded via this function rather
+    than defined as bare module-level literals, reducing accidental exposure
+    during debugging or introspection.  For production deployments, prefer a
+    dedicated secrets manager over plain environment variables.
+    """
+    return {
+        "API_KEY": os.getenv("OPENAI_API_KEY"),
+        "BASE_URL": normalize_openai_base_url(os.getenv("OPENAI_BASE_URL")),
+        "MODEL_NAME": os.getenv("OPENAI_MODEL_NAME"),
+        "PROXY_URL": os.getenv("PROXY_URL"),
+        "NTFY_TOPIC_URL": os.getenv("NTFY_TOPIC_URL"),
+        "GOTIFY_URL": os.getenv("GOTIFY_URL"),
+        "GOTIFY_TOKEN": os.getenv("GOTIFY_TOKEN"),
+        "BARK_URL": os.getenv("BARK_URL"),
+        "WX_BOT_URL": os.getenv("WX_BOT_URL"),
+        "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN"),
+        "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID"),
+        "WEBHOOK_URL": os.getenv("WEBHOOK_URL"),
+        "WEBHOOK_METHOD": os.getenv("WEBHOOK_METHOD", "POST").upper(),
+        "WEBHOOK_HEADERS": os.getenv("WEBHOOK_HEADERS"),
+        "WEBHOOK_CONTENT_TYPE": os.getenv("WEBHOOK_CONTENT_TYPE", "JSON").upper(),
+        "WEBHOOK_QUERY_PARAMETERS": os.getenv("WEBHOOK_QUERY_PARAMETERS"),
+        "WEBHOOK_BODY": os.getenv("WEBHOOK_BODY"),
+        "PCURL_TO_MOBILE": os.getenv("PCURL_TO_MOBILE", "false").lower() == "true",
+        "RUN_HEADLESS": os.getenv("RUN_HEADLESS", "true").lower() != "false",
+        "LOGIN_IS_EDGE": os.getenv("LOGIN_IS_EDGE", "false").lower() == "true",
+        "RUNNING_IN_DOCKER": os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true",
+        "AI_DEBUG_MODE": os.getenv("AI_DEBUG_MODE", "false").lower() == "true",
+        "SKIP_AI_ANALYSIS": os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true",
+        "ENABLE_THINKING": os.getenv("ENABLE_THINKING", "false").lower() == "true",
+        "ENABLE_RESPONSE_FORMAT": os.getenv("ENABLE_RESPONSE_FORMAT", "true").lower() == "true",
+    }
+
+
+_cfg = _load_env_config()
+API_KEY = _cfg["API_KEY"]
+BASE_URL = _cfg["BASE_URL"]
+MODEL_NAME = _cfg["MODEL_NAME"]
+PROXY_URL = _cfg["PROXY_URL"]
+NTFY_TOPIC_URL = _cfg["NTFY_TOPIC_URL"]
+GOTIFY_URL = _cfg["GOTIFY_URL"]
+GOTIFY_TOKEN = _cfg["GOTIFY_TOKEN"]
+BARK_URL = _cfg["BARK_URL"]
+WX_BOT_URL = _cfg["WX_BOT_URL"]
+TELEGRAM_BOT_TOKEN = _cfg["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID = _cfg["TELEGRAM_CHAT_ID"]
+WEBHOOK_URL = _cfg["WEBHOOK_URL"]
+WEBHOOK_METHOD = _cfg["WEBHOOK_METHOD"]
+WEBHOOK_HEADERS = _cfg["WEBHOOK_HEADERS"]
+WEBHOOK_CONTENT_TYPE = _cfg["WEBHOOK_CONTENT_TYPE"]
+WEBHOOK_QUERY_PARAMETERS = _cfg["WEBHOOK_QUERY_PARAMETERS"]
+WEBHOOK_BODY = _cfg["WEBHOOK_BODY"]
+PCURL_TO_MOBILE = _cfg["PCURL_TO_MOBILE"]
+RUN_HEADLESS = _cfg["RUN_HEADLESS"]
+LOGIN_IS_EDGE = _cfg["LOGIN_IS_EDGE"]
+RUNNING_IN_DOCKER = _cfg["RUNNING_IN_DOCKER"]
+AI_DEBUG_MODE = _cfg["AI_DEBUG_MODE"]
+SKIP_AI_ANALYSIS = _cfg["SKIP_AI_ANALYSIS"]
+ENABLE_THINKING = _cfg["ENABLE_THINKING"]
+ENABLE_RESPONSE_FORMAT = _cfg["ENABLE_RESPONSE_FORMAT"]
+del _cfg
 
 # --- Headers ---
 IMAGE_DOWNLOAD_HEADERS = {
@@ -83,16 +126,12 @@ if not client:
     # 为了保持一致性，这里只打印警告，具体逻辑由调用方处理
     pass
 
-# 检查关键配置
-if not all([BASE_URL, MODEL_NAME]) and 'prompt_generator.py' in sys.argv[0]:
-    sys.exit("错误：请确保在 .env 文件中完整设置了 OPENAI_BASE_URL 和 OPENAI_MODEL_NAME。(OPENAI_API_KEY 对于某些服务是可选的)")
-
 def get_ai_request_params(**kwargs):
     """
     构建AI请求参数，根据ENABLE_THINKING和ENABLE_RESPONSE_FORMAT环境变量决定是否添加相应参数
     """
     if ENABLE_THINKING:
-        kwargs["extra_body"] = {"enable_thinking": False}
+        kwargs["extra_body"] = {"enable_thinking": True}
     
     # 如果禁用结构化输出，则移除 text.format 配置
     if not ENABLE_RESPONSE_FORMAT and "text" in kwargs:

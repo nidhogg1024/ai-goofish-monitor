@@ -41,9 +41,10 @@ const {
   testAiConnection
 } = useSettings()
 
-const activeTab = ref('ai')
+const TAB_KEYS = ['ai', 'rotation', 'notifications', 'status', 'prompts'] as const
+const activeTab = ref<string>(TAB_KEYS[0])
 const route = useRoute()
-const validTabs = new Set(['notifications', 'ai', 'rotation', 'status', 'prompts'])
+const validTabs = new Set<string>(TAB_KEYS)
 
 const promptFiles = ref<string[]>([])
 const selectedPrompt = ref<string | null>(null)
@@ -152,7 +153,7 @@ async function fetchPrompts() {
     }
 
     const lastSelected = localStorage.getItem('lastSelectedPrompt')
-    if (lastSelected && files.includes(lastSelected)) {
+    if (typeof lastSelected === 'string' && lastSelected.length > 0 && lastSelected.length < 256 && files.includes(lastSelected)) {
       selectedPrompt.value = lastSelected
       return
     }
@@ -248,8 +249,10 @@ watch(selectedPrompt, async (value) => {
             <div class="grid gap-2">
               <Label>API Key</Label>
               <Input
-                v-model="aiSettings.OPENAI_API_KEY"
+                :model-value="aiSettings.OPENAI_API_KEY"
+                @update:model-value="(v: string | number) => aiSettings.OPENAI_API_KEY = String(v)"
                 type="password"
+                autocomplete="off"
                 :placeholder="t('settings.ai.keyPlaceholder')"
               />
               <p class="text-xs text-gray-500">

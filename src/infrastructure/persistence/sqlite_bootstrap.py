@@ -5,8 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_VALID_TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 from src.infrastructure.persistence.sqlite_connection import init_schema, sqlite_connection
 from src.infrastructure.persistence.storage_names import (
@@ -19,6 +25,13 @@ from src.services.task_taxonomy_service import ensure_task_taxonomy
 
 BOOTSTRAP_LOCK = threading.Lock()
 _bootstrap_done = False
+
+
+def reset_bootstrap_state() -> None:
+    """Reset bootstrap flag. For testing only."""
+    global _bootstrap_done
+    with BOOTSTRAP_LOCK:
+        _bootstrap_done = False
 LEGACY_CONFIG_FILE = "config.json"
 LEGACY_RESULT_DIR = "jsonl"
 LEGACY_PRICE_HISTORY_DIR = "price_history"
@@ -50,6 +63,8 @@ def bootstrap_sqlite_storage(
 
 
 def _table_is_empty(conn, table_name: str) -> bool:
+    if not _VALID_TABLE_NAME_RE.match(table_name):
+        raise ValueError(f"Invalid table name: {table_name}")
     row = conn.execute(f"SELECT COUNT(1) AS total FROM {table_name}").fetchone()
     return row is None or int(row["total"]) == 0
 
@@ -169,6 +184,7 @@ def _import_results_if_needed(conn, legacy_result_dir: str) -> None:
         conn.commit()
         return
 
+    batch_count = 0
     for path in sorted(result_dir.glob("*.jsonl")):
         filename = path.name
         keyword = normalize_keyword_from_filename(filename)
@@ -179,9 +195,13 @@ def _import_results_if_needed(conn, legacy_result_dir: str) -> None:
                     continue
                 try:
                     record = json.loads(text)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    logger.debug("跳过无效 JSON 行 (%s): %s", path, exc)
                     continue
                 _insert_result_record(conn, record, keyword=keyword, filename=filename)
+                batch_count += 1
+                if batch_count % 500 == 0:
+                    conn.commit()
     _mark_bootstrap_completed(conn, RESULTS_BOOTSTRAP_KEY)
     conn.commit()
 
@@ -199,6 +219,7 @@ def _import_price_snapshots_if_needed(conn, legacy_price_history_dir: str) -> No
         conn.commit()
         return
 
+    batch_count = 0
     for path in sorted(history_dir.glob("*_history.jsonl")):
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -207,9 +228,13 @@ def _import_price_snapshots_if_needed(conn, legacy_price_history_dir: str) -> No
                     continue
                 try:
                     record = json.loads(text)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    logger.debug("跳过无效 JSON 行 (%s): %s", path, exc)
                     continue
                 _insert_price_snapshot(conn, record)
+                batch_count += 1
+                if batch_count % 500 == 0:
+                    conn.commit()
     _mark_bootstrap_completed(conn, SNAPSHOTS_BOOTSTRAP_KEY)
     conn.commit()
 
@@ -225,7 +250,7 @@ def _insert_result_record(conn, record: dict, *, keyword: str, filename: str) ->
         if item_id:
             link_unique_key = f"item:{item_id}"
         else:
-            link_unique_key = "hash:" + hashlib.sha1(
+            link_unique_key = "hash:" + hashlib.sha256(
                 json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
     final_keyword = str(record.get("搜索关键字") or keyword)

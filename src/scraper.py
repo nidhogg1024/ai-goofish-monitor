@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import random
 import time
@@ -66,6 +67,8 @@ from src.services.search_pagination import (
 )
 from src.task_item_matcher import match_task_item
 
+logger = logging.getLogger(__name__)
+
 
 class RiskControlError(Exception):
     pass
@@ -91,6 +94,36 @@ _RISK_WIDGET_SELECTORS = (
     "div.baxia-dialog-mask",
     "div.J_MIDDLEWARE_FRAME_WIDGET",
 )
+
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+_ANTI_DETECTION_SCRIPT_BASE = """\
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [
+        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+        {name: 'Native Client', filename: 'internal-nacl-plugin'},
+    ]
+});
+Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
+"""
+
+_ANTI_DETECTION_SCRIPT_FULL = _ANTI_DETECTION_SCRIPT_BASE + """\
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications' ?
+        Promise.resolve({state: Notification.permission}) :
+        originalQuery(parameters)
+);
+"""
+
+PRICE_FILTER_LOW_RATIO = 0.7
+PRICE_FILTER_HIGH_RATIO = 1.3
 
 
 def _has_valid_auth_cookie_values(cookies) -> bool:
@@ -171,21 +204,21 @@ async def _click_login_entry(page) -> bool:
 
 async def _wait_for_login(page, context, state_file: str, *, timeout: int = _LOGIN_WAIT_TIMEOUT) -> bool:
     """检测到需要登录时，等待用户扫码完成，保存状态后返回 True；超时返回 False。"""
-    print("\n" + "=" * 60)
-    print("🔑 检测到需要登录，请在浏览器中扫码完成登录。")
-    print(f"   等待时间：最多 {timeout} 秒")
-    print("=" * 60 + "\n")
+    logger.info("=" * 60)
+    logger.info("检测到需要登录，请在浏览器中扫码完成登录。")
+    logger.info("等待时间：最多 %d 秒", timeout)
+    logger.info("=" * 60)
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             if page.is_closed():
-                print("⚠️  浏览器页面已关闭，无法继续等待登录。")
+                logger.warning("浏览器页面已关闭，无法继续等待登录。")
                 return False
             if await _is_authenticated_session(page, context):
-                print("\n✅ 扫码登录成功！正在保存登录状态...")
+                logger.info("扫码登录成功！正在保存登录状态...")
                 await _save_storage_state(context, state_file)
-                print(f"✅ 登录状态已保存到 {state_file}")
+                logger.info("登录状态已保存到 %s", state_file)
                 # 等一下让页面稳定
                 await asyncio.sleep(2)
                 return True
@@ -193,10 +226,13 @@ async def _wait_for_login(page, context, state_file: str, *, timeout: int = _LOG
             pass
         await asyncio.sleep(1.5)
 
-    print("\n⏰ 等待扫码登录超时，任务将中止。")
+    logger.warning("等待扫码登录超时，任务将中止。")
     return False
 
 
+# WARNING: Module-level mutable state below is NOT thread-safe.
+# These globals are designed for single-process async usage only.
+# If this module is ever used from multiple threads, add proper locking.
 FAILURE_GUARD = FailureGuard()
 GLOBAL_RISK_GUARD = GlobalRiskControlGuard(
     cooldown_seconds=app_settings.risk_control_cooldown_seconds
@@ -217,7 +253,7 @@ def _resolve_browser_channel() -> str:
     global EDGE_DOCKER_WARNING_PRINTED
     if RUNNING_IN_DOCKER:
         if LOGIN_IS_EDGE and not EDGE_DOCKER_WARNING_PRINTED:
-            print(
+            logger.warning(
                 "检测到 LOGIN_IS_EDGE=true，但 Docker 镜像未内置 Edge，"
                 "任务运行时将改用 Chromium。"
             )
@@ -244,7 +280,7 @@ async def _notify_manual_verification_required(
 ) -> None:
     task_key = f"{task_name}|{keyword}|{reason}"
     if not _should_send_manual_verification_alert(task_key):
-        print(f"手动验证提醒已在冷却中，跳过重复通知: {task_name}")
+        logger.info("手动验证提醒已在冷却中，跳过重复通知: %s", task_name)
         return
 
     product_data = {
@@ -262,7 +298,7 @@ async def _notify_manual_verification_required(
     try:
         await send_ntfy_notification(product_data, notify_reason)
     except Exception as exc:
-        print(f"发送人工验证提醒失败: {exc}")
+        logger.error("发送人工验证提醒失败: %s", exc)
 
 
 def _should_analyze_images(task_config: dict) -> bool:
@@ -305,8 +341,9 @@ async def _notify_task_failure(
     )
 
     if not guard_result.get("should_notify"):
-        print(
-            f"[FailureGuard] 任务 '{task_name}' 失败计数 {guard_result.get('consecutive_failures')}/{FAILURE_GUARD.threshold}，暂不通知。"
+        logger.info(
+            "[FailureGuard] 任务 '%s' 失败计数 %s/%s，暂不通知。",
+            task_name, guard_result.get('consecutive_failures'), FAILURE_GUARD.threshold,
         )
         return
 
@@ -331,7 +368,7 @@ async def _notify_task_failure(
     try:
         await send_ntfy_notification(product_data, notify_reason)
     except Exception as e:
-        print(f"发送任务异常通知失败: {e}")
+        logger.error("发送任务异常通知失败: %s", e)
 
 
 def _as_bool(value, default: bool = False) -> bool:
@@ -418,7 +455,7 @@ def _get_seller_profile_cache_ttl(task_config: dict) -> int:
 
 def _default_context_options() -> dict:
     return {
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "user_agent": _DEFAULT_USER_AGENT,
         "viewport": {"width": 1440, "height": 900},
         "device_scale_factor": 2,
         "is_mobile": False,
@@ -518,12 +555,12 @@ async def _interactive_recover_session(
     proxy_server: Optional[str] = None,
     timeout: int = _LOGIN_WAIT_TIMEOUT,
 ) -> bool:
-    print("\n" + "=" * 66)
-    print("⚠️  任务在无头模式下触发了登录/风控校验。")
-    print(f"原因: {reason}")
-    print("即将临时打开一个可见浏览器窗口，请手动完成扫码或验证。")
-    print("完成后系统会自动保存登录状态，并回到无头模式继续重试。")
-    print("=" * 66 + "\n")
+    logger.warning("=" * 66)
+    logger.warning("任务在无头模式下触发了登录/风控校验。")
+    logger.warning("原因: %s", reason)
+    logger.warning("即将临时打开一个可见浏览器窗口，请手动完成扫码或验证。")
+    logger.warning("完成后系统会自动保存登录状态，并回到无头模式继续重试。")
+    logger.warning("=" * 66)
 
     GLOBAL_RISK_GUARD.activate(
         task_name=task_name,
@@ -544,7 +581,7 @@ async def _interactive_recover_session(
             with open(state_file, "r", encoding="utf-8") as f:
                 snapshot_data = json.load(f)
         except Exception as e:
-            print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
+            logger.warning("读取登录状态文件失败，将直接按路径使用: %s", e)
 
     async with async_playwright() as p:
         launch_args = [
@@ -582,18 +619,7 @@ async def _interactive_recover_session(
                 **_clean_kwargs(context_kwargs),
             )
             try:
-                await context.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'plugins', {
-                        get: () => [
-                            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
-                            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
-                            {name: 'Native Client', filename: 'internal-nacl-plugin'},
-                        ]
-                    });
-                    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
-                    window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
-                """)
+                await context.add_init_script(_ANTI_DETECTION_SCRIPT_BASE)
             except Exception:
                 pass
 
@@ -606,7 +632,7 @@ async def _interactive_recover_session(
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if page.is_closed():
-                    print("⚠️  交互恢复窗口已关闭，未能完成恢复。")
+                    logger.warning("交互恢复窗口已关闭，未能完成恢复。")
                     return False
                 if await _is_authenticated_session(page, context):
                     await page.wait_for_timeout(1200)
@@ -615,11 +641,11 @@ async def _interactive_recover_session(
                         continue
                     await _save_storage_state(context, state_file)
                     GLOBAL_RISK_GUARD.clear()
-                    print(f"✅ 交互恢复成功，登录状态已更新到 {state_file}")
+                    logger.info("交互恢复成功，登录状态已更新到 %s", state_file)
                     return True
                 await asyncio.sleep(1.5)
 
-            print("⏰ 交互恢复等待超时，本次任务将中止。")
+            logger.warning("交互恢复等待超时，本次任务将中止。")
             return False
         finally:
             await browser.close()
@@ -629,7 +655,7 @@ async def scrape_user_profile(context, user_id: str) -> dict:
     """
     【新版】访问指定用户的个人主页，按顺序采集其摘要信息、完整的商品列表和完整的评价列表。
     """
-    print(f"   -> 开始采集用户ID: {user_id} 的完整信息...")
+    logger.info("开始采集用户ID: %s 的完整信息...", user_id)
     profile_data = {}
     page = await context.new_page()
 
@@ -647,7 +673,7 @@ async def scrape_user_profile(context, user_id: str) -> dict:
         ):
             try:
                 head_api_future.set_result(await response.json())
-                print(f"      [API捕获] 用户头部信息... 成功")
+                logger.info("[API捕获] 用户头部信息... 成功")
             except Exception as e:
                 if not head_api_future.done():
                     head_api_future.set_exception(e)
@@ -657,7 +683,7 @@ async def scrape_user_profile(context, user_id: str) -> dict:
             try:
                 data = await response.json()
                 all_items.extend(data.get("data", {}).get("cardList", []))
-                print(f"      [API捕获] 商品列表... 当前已捕获 {len(all_items)} 件")
+                logger.info("[API捕获] 商品列表... 当前已捕获 %d 件", len(all_items))
                 if not data.get("data", {}).get("nextPage", True):
                     stop_item_scrolling.set()
             except Exception as e:
@@ -668,7 +694,7 @@ async def scrape_user_profile(context, user_id: str) -> dict:
             try:
                 data = await response.json()
                 all_ratings.extend(data.get("data", {}).get("cardList", []))
-                print(f"      [API捕获] 评价列表... 当前已捕获 {len(all_ratings)} 条")
+                logger.info("[API捕获] 评价列表... 当前已捕获 %d 条", len(all_ratings))
                 if not data.get("data", {}).get("nextPage", True):
                     stop_rating_scrolling.set()
             except Exception as e:
@@ -684,22 +710,22 @@ async def scrape_user_profile(context, user_id: str) -> dict:
             timeout=20000,
         )
         head_data = await asyncio.wait_for(head_api_future, timeout=15)
-        profile_data = await parse_user_head_data(head_data)
+        profile_data = parse_user_head_data(head_data)
 
         # --- 任务2: 滚动加载所有商品 (默认页面) ---
-        print("      [采集阶段] 开始采集该用户的商品列表...")
+        logger.info("[采集阶段] 开始采集该用户的商品列表...")
         await random_sleep(2, 4)  # 等待第一页商品API完成
         while not stop_item_scrolling.is_set():
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             try:
                 await asyncio.wait_for(stop_item_scrolling.wait(), timeout=8)
             except asyncio.TimeoutError:
-                print("      [滚动超时] 商品列表可能已加载完毕。")
+                logger.info("[滚动超时] 商品列表可能已加载完毕。")
                 break
-        profile_data["卖家发布的商品列表"] = await _parse_user_items_data(all_items)
+        profile_data["卖家发布的商品列表"] = _parse_user_items_data(all_items)
 
         # --- 任务3: 点击并采集所有评价 ---
-        print("      [采集阶段] 开始采集该用户的评价列表...")
+        logger.info("[采集阶段] 开始采集该用户的评价列表...")
         rating_tab_locator = page.locator("//div[text()='信用及评价']/ancestor::li")
         if await rating_tab_locator.count() > 0:
             await rating_tab_locator.click()
@@ -710,21 +736,21 @@ async def scrape_user_profile(context, user_id: str) -> dict:
                 try:
                     await asyncio.wait_for(stop_rating_scrolling.wait(), timeout=8)
                 except asyncio.TimeoutError:
-                    print("      [滚动超时] 评价列表可能已加载完毕。")
+                    logger.info("[滚动超时] 评价列表可能已加载完毕。")
                     break
 
-            profile_data["卖家收到的评价列表"] = await parse_ratings_data(all_ratings)
-            reputation_stats = await calculate_reputation_from_ratings(all_ratings)
+            profile_data["卖家收到的评价列表"] = parse_ratings_data(all_ratings)
+            reputation_stats = calculate_reputation_from_ratings(all_ratings)
             profile_data.update(reputation_stats)
         else:
-            print("      [警告] 未找到评价选项卡，跳过评价采集。")
+            logger.warning("[警告] 未找到评价选项卡，跳过评价采集。")
 
     except Exception as e:
-        print(f"   [错误] 采集用户 {user_id} 信息时发生错误: {e}")
+        logger.error("采集用户 %s 信息时发生错误: %s", user_id, e)
     finally:
         page.remove_listener("response", handle_response)
         await page.close()
-        print(f"   -> 用户 {user_id} 信息采集完成。")
+        logger.info("用户 %s 信息采集完成。", user_id)
 
     return profile_data
 
@@ -763,10 +789,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     is_cold_start = len(processed_links) == 0
     if is_cold_start:
         effective_max_pages = task_config.get("first_scan_max_pages", 10)
-        print(f"LOG: 冷启动模式：结果集 {result_filename} 为空，首次扫描将拉取 {effective_max_pages} 页（综合排序）")
+        logger.info("冷启动模式：结果集 %s 为空，首次扫描将拉取 %d 页（综合排序）", result_filename, effective_max_pages)
     else:
         effective_max_pages = max_pages
-        print(f"LOG: 增量模式：已有 {len(processed_links)} 条历史数据，将扫描 {effective_max_pages} 页（新发布排序）")
+        logger.info("增量模式：已有 %d 条历史数据，将扫描 %d 页（新发布排序）", len(processed_links), effective_max_pages)
 
     rotation_settings = _get_rotation_settings(task_config)
     account_items = load_state_files(rotation_settings["account_state_dir"])
@@ -834,7 +860,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         if not os.path.exists(state_file):
             if RUN_HEADLESS:
                 raise FileNotFoundError(f"登录状态文件不存在: {state_file}（headless 模式无法扫码，请先完成登录）")
-            print(f"⚠️  登录状态文件不存在: {state_file}，将打开浏览器等待扫码登录。")
+            logger.warning("登录状态文件不存在: %s，将打开浏览器等待扫码登录。", state_file)
 
         snapshot_data = None
         if os.path.exists(state_file):
@@ -842,7 +868,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 with open(state_file, "r", encoding="utf-8") as f:
                     snapshot_data = json.load(f)
             except Exception as e:
-                print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
+                logger.warning("读取登录状态文件失败，将直接按路径使用: %s", e)
 
         async with async_playwright() as p:
             launch_args = [
@@ -872,7 +898,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     key in snapshot_data
                     for key in ("env", "headers", "page", "storage")
                 ):
-                    print(f"检测到增强浏览器快照，应用环境参数: {state_file}")
+                    logger.info("检测到增强浏览器快照，应用环境参数: %s", state_file)
                     storage_state_arg = {"cookies": snapshot_data.get("cookies", [])}
                     context_kwargs.update(_build_context_overrides(snapshot_data))
                     extra_headers = _build_extra_headers(snapshot_data.get("headers"))
@@ -901,24 +927,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 saver=save_to_jsonl,
             )
 
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [
-                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
-                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
-                        {name: 'Native Client', filename: 'internal-nacl-plugin'},
-                    ]
-                });
-                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
-                window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({state: Notification.permission}) :
-                        originalQuery(parameters)
-                );
-            """)
+            await context.add_init_script(_ANTI_DETECTION_SCRIPT_FULL)
 
             page = await context.new_page()
 
@@ -1020,10 +1029,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 try:
                     # 等待弹窗在2秒内出现。如果出现，则执行块内代码。
                     await baxia_dialog.wait_for(state="visible", timeout=2000)
-                    print(
-                        "\n==================== CRITICAL BLOCK DETECTED ===================="
-                    )
-                    print("检测到闲鱼反爬虫验证弹窗 (baxia-dialog)。")
+                    logger.error("==================== CRITICAL BLOCK DETECTED ====================")
+                    logger.error("检测到闲鱼反爬虫验证弹窗 (baxia-dialog)。")
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
@@ -1033,20 +1040,19 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             reason="触发 baxia-dialog 验证弹窗",
                             proxy_server=proxy_server,
                         )
-                        print("===================================================================")
+                        logger.error("===================================================================")
                         if recovered:
                             raise InteractiveRecoveryRequested("已完成交互验证，准备重新执行任务。")
                         raise RiskControlError("baxia-dialog")
-                    print("请在浏览器中手动完成验证（滑动验证码等），完成后将自动继续。")
-                    print(f"等待时间：最多 {_LOGIN_WAIT_TIMEOUT} 秒")
-                    print("===================================================================")
-                    # 等待弹窗消失（用户手动完成验证后弹窗会关闭）
+                    logger.warning("请在浏览器中手动完成验证（滑动验证码等），完成后将自动继续。")
+                    logger.warning("等待时间：最多 %d 秒", _LOGIN_WAIT_TIMEOUT)
+                    logger.warning("===================================================================")
                     try:
                         await baxia_dialog.wait_for(state="hidden", timeout=_LOGIN_WAIT_TIMEOUT * 1000)
-                        print("✅ 验证通过，继续执行任务。")
+                        logger.info("验证通过，继续执行任务。")
                         await random_sleep(1, 2)
                     except PlaywrightTimeoutError:
-                        print("⏰ 等待验证超时，任务将中止。")
+                        logger.error("等待验证超时，任务将中止。")
                         raise RiskControlError("baxia-dialog 验证超时")
                 except PlaywrightTimeoutError:
                     # 2秒内弹窗未出现，这是正常情况，继续执行
@@ -1055,10 +1061,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 # 检查是否有J_MIDDLEWARE_FRAME_WIDGET覆盖层
                 try:
                     await middleware_widget.wait_for(state="visible", timeout=2000)
-                    print(
-                        "\n==================== CRITICAL BLOCK DETECTED ===================="
-                    )
-                    print("检测到闲鱼验证弹窗 (J_MIDDLEWARE_FRAME_WIDGET)。")
+                    logger.error("==================== CRITICAL BLOCK DETECTED ====================")
+                    logger.error("检测到闲鱼验证弹窗 (J_MIDDLEWARE_FRAME_WIDGET)。")
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
@@ -1068,19 +1072,19 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             reason="触发 J_MIDDLEWARE_FRAME_WIDGET 验证弹窗",
                             proxy_server=proxy_server,
                         )
-                        print("===================================================================")
+                        logger.error("===================================================================")
                         if recovered:
                             raise InteractiveRecoveryRequested("已完成交互验证，准备重新执行任务。")
                         raise RiskControlError("J_MIDDLEWARE_FRAME_WIDGET")
-                    print("请在浏览器中手动完成验证，完成后将自动继续。")
-                    print(f"等待时间：最多 {_LOGIN_WAIT_TIMEOUT} 秒")
-                    print("===================================================================")
+                    logger.warning("请在浏览器中手动完成验证，完成后将自动继续。")
+                    logger.warning("等待时间：最多 %d 秒", _LOGIN_WAIT_TIMEOUT)
+                    logger.warning("===================================================================")
                     try:
                         await middleware_widget.wait_for(state="hidden", timeout=_LOGIN_WAIT_TIMEOUT * 1000)
-                        print("✅ 验证通过，继续执行任务。")
+                        logger.info("验证通过，继续执行任务。")
                         await random_sleep(1, 2)
                     except PlaywrightTimeoutError:
-                        print("⏰ 等待验证超时，任务将中止。")
+                        logger.error("等待验证超时，任务将中止。")
                         raise RiskControlError("J_MIDDLEWARE_FRAME_WIDGET 验证超时")
                 except PlaywrightTimeoutError:
                     # 2秒内弹窗未出现，这是正常情况，继续执行
@@ -1089,9 +1093,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
                 try:
                     await page.click("div[class*='closeIconBg']", timeout=3000)
-                    print("LOG: 已关闭广告弹窗。")
+                    logger.info("已关闭广告弹窗。")
                 except PlaywrightTimeoutError:
-                    print("LOG: 未检测到广告弹窗。")
+                    logger.info("未检测到广告弹窗。")
 
                 final_response = None
                 log_time("步骤 2 - 应用筛选条件...")
@@ -1116,7 +1120,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             f"新发布筛选 '{effective_publish_option}' 请求超时，继续执行。"
                         )
                     except Exception as e:
-                        print(f"LOG: 应用新发布筛选失败: {e}")
+                        logger.error("应用新发布筛选失败: %s", e)
 
                 if personal_only:
                     async with page.expect_response(
@@ -1138,7 +1142,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     except PlaywrightTimeoutError:
                         log_time("包邮筛选请求超时，继续执行。")
                     except Exception as e:
-                        print(f"LOG: 应用包邮筛选失败: {e}")
+                        logger.error("应用包邮筛选失败: %s", e)
 
                 if region_filter:
                     try:
@@ -1161,7 +1165,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                     has=page.get_by_text("查看")
                                 ).last
                             if not await popover.count():
-                                print("LOG: 未找到区域弹窗，跳过区域筛选。")
+                                logger.warning("未找到区域弹窗，跳过区域筛选。")
                                 raise PlaywrightTimeoutError("region-popover-not-found")
                             await popover.wait_for(state="visible", timeout=5000)
 
@@ -1198,7 +1202,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                     except PlaywrightTimeoutError:
                                         pass
                                 else:
-                                    print(f"LOG: 未找到{desc} '{text_value}'，跳过。")
+                                    logger.warning("未找到%s '%s'，跳过。", desc, text_value)
 
                             if len(region_parts) >= 1:
                                 await _click_in_column(
@@ -1231,15 +1235,15 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 except PlaywrightTimeoutError:
                                     log_time("区域筛选提交超时，继续执行。")
                             else:
-                                print(
-                                    "LOG: 未找到区域弹窗的“查看XX件宝贝”按钮，跳过提交。"
+                                logger.warning(
+                                    "未找到区域弹窗的“查看XX件宝贝”按钮，跳过提交。"
                                 )
                         else:
-                            print("LOG: 未找到区域筛选触发器。")
+                            logger.warning("未找到区域筛选触发器。")
                     except PlaywrightTimeoutError:
                         log_time(f"区域筛选 '{region_filter}' 请求超时，继续执行。")
                     except Exception as e:
-                        print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {e}")
+                        logger.error("应用区域筛选 '%s' 失败: %s", region_filter, e)
 
                 log_time("所有筛选已完成，开始处理商品列表...")
 
@@ -1266,15 +1270,15 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         log_time(f"第 {page_num} 页响应无效，跳过。")
                         continue
 
-                    basic_items = await _parse_search_results_json(
+                    basic_items = _parse_search_results_json(
                         await current_response.json(), f"第 {page_num} 页"
                     )
                     if not basic_items:
                         break
 
                     if min_price or max_price:
-                        price_floor = float(min_price) * 0.7 if min_price else 0
-                        price_ceil = float(max_price) * 1.3 if max_price else float("inf")
+                        price_floor = float(min_price) * PRICE_FILTER_LOW_RATIO if min_price else 0
+                        price_ceil = float(max_price) * PRICE_FILTER_HIGH_RATIO if max_price else float("inf")
                         before_price_filter = len(basic_items)
 
                         def _extract_price(item: dict) -> float:
@@ -1370,35 +1374,29 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 detail_json = await detail_response.json()
 
                                 ret_string = str(
-                                    await safe_get(detail_json, "ret", default=[])
+                                    safe_get(detail_json, "ret", default=[])
                                 )
                                 if "FAIL_SYS_USER_VALIDATE" in ret_string:
-                                    print(
-                                        "\n==================== CRITICAL BLOCK DETECTED ===================="
-                                    )
-                                    print(
-                                        "检测到闲鱼反爬虫验证 (FAIL_SYS_USER_VALIDATE)，程序将终止。"
-                                    )
+                                    logger.error("==================== CRITICAL BLOCK DETECTED ====================")
+                                    logger.error("检测到闲鱼反爬虫验证 (FAIL_SYS_USER_VALIDATE)，程序将终止。")
                                     long_sleep_duration = random.randint(3, 60)
-                                    print(
-                                        f"为避免账户风险，将执行一次长时间休眠 ({long_sleep_duration} 秒) 后再退出..."
+                                    logger.error(
+                                        "为避免账户风险，将执行一次长时间休眠 (%d 秒) 后再退出...", long_sleep_duration
                                     )
                                     await asyncio.sleep(long_sleep_duration)
-                                    print("长时间休眠结束，现在将安全退出。")
-                                    print(
-                                        "==================================================================="
-                                    )
+                                    logger.info("长时间休眠结束，现在将安全退出。")
+                                    logger.error("===================================================================")
                                     raise RiskControlError("FAIL_SYS_USER_VALIDATE")
 
                                 # 解析商品详情数据并更新 item_data
-                                item_do = await safe_get(
+                                item_do = safe_get(
                                     detail_json, "data", "itemDO", default={}
                                 )
-                                seller_do = await safe_get(
+                                seller_do = safe_get(
                                     detail_json, "data", "sellerDO", default={}
                                 )
 
-                                reg_days_raw = await safe_get(
+                                reg_days_raw = safe_get(
                                     seller_do, "userRegDay", default=0
                                 )
                                 registration_duration_text = format_registration_days(
@@ -1408,12 +1406,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 # --- START: 新增代码块 ---
 
                                 # 1. 提取卖家的芝麻信用信息
-                                zhima_credit_text = await safe_get(
+                                zhima_credit_text = safe_get(
                                     seller_do, "zhimaLevelInfo", "levelName"
                                 )
 
                                 # 2. 提取该商品的完整图片列表
-                                image_infos = await safe_get(
+                                image_infos = safe_get(
                                     item_do, "imageInfos", default=[]
                                 )
                                 if image_infos:
@@ -1430,26 +1428,26 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                         item_data["商品主图链接"] = all_image_urls[0]
 
                                 # --- END: 新增代码块 ---
-                                item_data["“想要”人数"] = await safe_get(
+                                item_data["“想要”人数"] = safe_get(
                                     item_do,
                                     "wantCnt",
                                     default=item_data.get("“想要”人数", "NaN"),
                                 )
-                                item_data["浏览量"] = await safe_get(
+                                item_data["浏览量"] = safe_get(
                                     item_do, "browseCnt", default="-"
                                 )
 
-                                detail_desc = await safe_get(
+                                detail_desc = safe_get(
                                     item_do, "desc", default=""
                                 )
                                 if detail_desc:
                                     item_data["商品描述"] = detail_desc
 
-                                props_list = await safe_get(
+                                props_list = safe_get(
                                     item_do, "newItemProperties", default=[]
                                 )
                                 if not props_list:
-                                    props_list = await safe_get(
+                                    props_list = safe_get(
                                         item_do, "itemProperties", default=[]
                                     )
                                 if props_list and isinstance(props_list, list):
@@ -1483,7 +1481,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                     )
                                     continue
 
-                                user_id = await safe_get(seller_do, "sellerId")
+                                user_id = safe_get(seller_do, "sellerId")
 
                                 # 构建基础记录
                                 final_record = {
@@ -1535,25 +1533,25 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 )
                                 await random_sleep(5, 10)
                             else:
-                                print(
-                                    f"   错误: 获取商品详情API响应失败，状态码: {detail_response.status}"
+                                logger.error(
+                                    "获取商品详情API响应失败，状态码: %s", detail_response.status
                                 )
                                 if AI_DEBUG_MODE:
-                                    print(
-                                        f"--- [DETAIL DEBUG] FAILED RESPONSE from {item_data['商品链接']} ---"
+                                    logger.debug(
+                                        "--- [DETAIL DEBUG] FAILED RESPONSE from %s ---", item_data['商品链接']
                                     )
                                     try:
-                                        print(await detail_response.text())
+                                        logger.debug(await detail_response.text())
                                     except Exception as e:
-                                        print(f"无法读取响应内容: {e}")
-                                    print(
+                                        logger.debug("无法读取响应内容: %s", e)
+                                    logger.debug(
                                         "----------------------------------------------------"
                                     )
 
                         except PlaywrightTimeoutError:
-                            print(f"   错误: 访问商品详情页或等待API响应超时。")
+                            logger.error("访问商品详情页或等待API响应超时。")
                         except Exception as e:
-                            print(f"   错误: 处理商品详情时发生未知错误: {e}")
+                            logger.error("处理商品详情时发生未知错误: %s", e)
                         finally:
                             await detail_page.close()
                             # --- 修改: 增加关闭页面后的短暂整理时间 ---
@@ -1566,8 +1564,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         stop_scraping = True
 
                     if not stop_scraping and page_num < effective_max_pages:
-                        print(
-                            f"--- 第 {page_num} 页处理完毕（新 {page_new_count} / 旧 {page_seen_count}），准备翻到下一页。执行页面间休息... ---"
+                        logger.info(
+                            "第 %d 页处理完毕（新 %d / 旧 %d），准备翻到下一页。执行页面间休息...",
+                            page_num, page_new_count, page_seen_count,
                         )
                         await random_sleep(5, 10)
 
@@ -1592,7 +1591,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         raise LoginRequiredError("扫码登录超时，任务中止。") from e
                     # 登录成功但当前页面状态已乱，抛异常触发重试
                     raise LoginRequiredError("登录成功，需要重新执行任务。") from e
-                print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{e}")
+                logger.error("操作超时错误: 页面元素或网络响应未在规定时间内出现。%s", e)
                 raise
             except asyncio.CancelledError:
                 log_time("收到取消信号，正在终止当前爬虫任务...")
@@ -1620,7 +1619,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     raise LoginRequiredError(
                         f"Login required: redirected to passport flow ({e})"
                     ) from e
-                print(f"\n爬取过程中发生未知错误: {e}")
+                logger.error("爬取过程中发生未知错误: %s", e)
                 raise
             finally:
                 if analysis_dispatcher is not None:
@@ -1660,8 +1659,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         task_name_for_guard, cookie_path=pause_cookie_path
     )
     if decision.skip:
-        print(
-            f"[FailureGuard] 任务 '{task_name_for_guard}' 已暂停重试 (连续失败 {decision.consecutive_failures}/{FAILURE_GUARD.threshold})"
+        logger.warning(
+            "[FailureGuard] 任务 '%s' 已暂停重试 (连续失败 %s/%s)",
+            task_name_for_guard, decision.consecutive_failures, FAILURE_GUARD.threshold,
         )
         if decision.should_notify:
             try:
@@ -1678,7 +1678,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     "修复方法: 更新登录态/cookies文件后会自动恢复。",
                 )
             except Exception as e:
-                print(f"发送任务暂停通知失败: {e}")
+                logger.error("发送任务暂停通知失败: %s", e)
 
         cleanup_task_images(task_config.get("task_name", "default"))
         return 0
@@ -1709,24 +1709,24 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
         if rotation_settings["account_enabled"] and not selected_account:
             last_error = "未找到可用的登录状态文件，无法继续执行任务。"
-            print(last_error)
+            logger.error(last_error)
             break
         if not rotation_settings["account_enabled"] and not selected_account:
             last_error = "未找到可用的登录状态文件，无法继续执行任务。"
-            print(last_error)
+            logger.error(last_error)
             break
         if rotation_settings["proxy_enabled"] and not selected_proxy:
             last_error = "未找到可用的代理地址，无法继续执行任务。"
-            print(last_error)
+            logger.error(last_error)
             break
 
         state_path = selected_account.value if selected_account else STATE_FILE
         last_state_path = state_path
         proxy_server = selected_proxy.value if selected_proxy else None
         if rotation_settings["account_enabled"]:
-            print(f"账号轮换：使用登录状态 {state_path}")
+            logger.info("账号轮换：使用登录状态 %s", state_path)
         if rotation_settings["proxy_enabled"] and proxy_server:
-            print(f"IP 轮换：使用代理 {proxy_server}")
+            logger.info("IP 轮换：使用代理 %s", proxy_server)
 
         try:
             processed_item_count += await _run_scrape_attempt(state_path, proxy_server)
@@ -1734,7 +1734,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             FAILURE_GUARD.record_success(task_name_for_guard)
             break
         except InteractiveRecoveryRequested as e:
-            print(f"交互恢复完成: {e}")
+            logger.info("交互恢复完成: %s", e)
             last_error = ""
             if interactive_recovery_budget > 0:
                 interactive_recovery_budget -= 1
@@ -1745,18 +1745,18 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             break
         except LoginRequiredError as e:
             last_error = str(e)
-            print(f"检测到登录失效/重定向: {e}")
+            logger.warning("检测到登录失效/重定向: %s", e)
             break
         except RiskControlError as e:
             last_error = str(e)
-            print(f"检测到风控或验证触发: {e}")
+            logger.warning("检测到风控或验证触发: %s", e)
             # 风控验证通常不是简单轮换能解决的，避免无意义重试。
             break
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
-            print(f"本次尝试失败: {last_error}")
+            logger.error("本次尝试失败: %s", last_error)
             if attempt < max_attempts:
-                print("将尝试轮换账号/IP 后重试...")
+                logger.info("将尝试轮换账号/IP 后重试...")
         attempt += 1
 
     if last_error:

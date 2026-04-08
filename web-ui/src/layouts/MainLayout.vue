@@ -103,5 +103,10 @@ const { t } = useI18n()
     opacity: 1;
     transform: none;
   }
+
+  [aria-hidden="true"] > div {
+    animation: none !important;
+    filter: blur(60px) !important;
+  }
 }
 </style>

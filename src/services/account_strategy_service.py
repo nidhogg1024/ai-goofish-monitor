@@ -11,6 +11,7 @@ def clean_account_state_file(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     text = str(value).strip()
+    # "null"/"undefined" strings originate from frontend form submissions
     if not text or text in {"null", "undefined"}:
         return None
     return text

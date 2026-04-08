@@ -1,12 +1,15 @@
 """
 企业微信机器人通知客户端
 """
-import asyncio
-from typing import Dict
+from typing import Dict, Optional
 
-import requests
+import httpx
 
 from .base import NotificationClient
+
+_WECOM_WEBHOOK_URL_PREFIX = (
+    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
+)
 
 
 class WeComBotClient(NotificationClient):
@@ -15,7 +18,7 @@ class WeComBotClient(NotificationClient):
     channel_key = "wecom"
     display_name = "企业微信"
 
-    def __init__(self, bot_url: str | None = None, pcurl_to_mobile: bool = True):
+    def __init__(self, bot_url: Optional[str] = None, pcurl_to_mobile: bool = True):
         super().__init__(enabled=bool(bot_url), pcurl_to_mobile=pcurl_to_mobile)
         self.bot_url = bot_url
 
@@ -35,17 +38,13 @@ class WeComBotClient(NotificationClient):
             "markdown": {"content": "\n".join(markdown_lines)},
         }
         headers = {"Content-Type": "application/json"}
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.post(
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
                 self.bot_url,
                 json=payload,
                 headers=headers,
-                timeout=10,
-            ),
-        )
-        response.raise_for_status()
-        result = response.json()
-        if result.get("errcode", 0) != 0:
-            raise RuntimeError(result.get("errmsg", "企业微信返回未知错误"))
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("errcode", 0) != 0:
+                raise RuntimeError(result.get("errmsg", "企业微信返回未知错误"))

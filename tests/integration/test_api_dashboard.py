@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi import FastAPI
@@ -7,23 +8,20 @@ from src.api import dependencies as deps
 from src.api.routes import dashboard
 from src.domain.models.task import TaskCreate
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+from src.services.result_storage_service import save_result_record
 from src.services.task_service import TaskService
-
-
-def _write_jsonl(path, records):
-    with open(path, "w", encoding="utf-8") as file:
-        for record in records:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def test_dashboard_summary_aggregates_tasks_and_results(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    db_path = str(tmp_path / "app.sqlite3")
+    monkeypatch.setenv("APP_DATABASE_FILE", db_path)
 
     jsonl_dir = tmp_path / "jsonl"
     jsonl_dir.mkdir(parents=True, exist_ok=True)
 
     repository = SqliteTaskRepository(
-        db_path=str(tmp_path / "app.sqlite3"),
+        db_path=db_path,
         legacy_config_file=None,
     )
     task_service = TaskService(repository)
@@ -89,7 +87,8 @@ def test_dashboard_summary_aggregates_tasks_and_results(tmp_path, monkeypatch):
             },
         },
     ]
-    _write_jsonl(jsonl_dir / "apple_watch_full_data.jsonl", records)
+    for record in records:
+        asyncio.run(save_result_record(record, keyword="apple watch"))
 
     response = client.get("/api/dashboard/summary")
     assert response.status_code == 200

@@ -103,16 +103,27 @@ export function useLogs() {
     }
   }
 
-  function startAutoRefresh() {
+  function scheduleNextRefresh() {
     if (refreshInterval) return
-    fetchLogs() // Fetch immediately
-    refreshInterval = window.setInterval(fetchLogs, 2000)
+    refreshInterval = window.setTimeout(async () => {
+      refreshInterval = null
+      await fetchLogs()
+      if (isAutoRefresh.value) {
+        scheduleNextRefresh()
+      }
+    }, 2000)
+  }
+
+  function startAutoRefresh() {
+    if (isAutoRefresh.value && refreshInterval) return
     isAutoRefresh.value = true
+    fetchLogs()
+    scheduleNextRefresh()
   }
 
   function stopAutoRefresh() {
     if (refreshInterval) {
-      clearInterval(refreshInterval)
+      clearTimeout(refreshInterval)
       refreshInterval = null
     }
     isAutoRefresh.value = false

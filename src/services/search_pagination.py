@@ -1,10 +1,13 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from src.utils import log_time, random_sleep
+
+logger = logging.getLogger(__name__)
 
 SEARCH_RESULTS_API_FRAGMENT = "/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/"
 
@@ -58,8 +61,11 @@ async def _wait_for_search_response(
     captured: asyncio.Future = loop.create_future()
 
     def on_response(response: Any) -> None:
-        if not captured.done() and is_search_results_response(response):
-            captured.set_result(response)
+        try:
+            if not captured.done() and is_search_results_response(response):
+                captured.set_result(response)
+        except Exception as exc:
+            logger.warning("on_response 回调异常: %s", exc)
 
     page.on("response", on_response)
     try:

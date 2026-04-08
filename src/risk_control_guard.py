@@ -11,10 +11,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_parent(path: str) -> None:
@@ -30,10 +33,13 @@ def _read_json(path: str) -> dict:
         return data if isinstance(data, dict) else {}
     except FileNotFoundError:
         return {}
-    except Exception:
+    except Exception as exc:
+        logger.warning("读取风控状态文件 %s 失败: %s", path, exc)
         return {}
 
 
+# NOTE: No file lock here; concurrent writes from multiple processes may race.
+# Consider adding fcntl.flock if multiple processes share this state file.
 def _write_json(path: str, payload: dict) -> None:
     _ensure_parent(path)
     tmp = f"{path}.tmp"
@@ -48,7 +54,10 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         return None
 
@@ -68,8 +77,9 @@ class GlobalRiskControlGuard:
     def snapshot(self) -> dict:
         data = _read_json(self.path)
         cooldown_until = _parse_dt(data.get("cooldown_until"))
+        now = datetime.now(tz=timezone.utc)
         return {
-            "active": bool(cooldown_until and cooldown_until > datetime.now()),
+            "active": bool(cooldown_until and cooldown_until > now),
             "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
             "reason": data.get("reason"),
             "task_name": data.get("task_name"),
@@ -80,7 +90,7 @@ class GlobalRiskControlGuard:
     def should_skip_start(self) -> GlobalRiskDecision:
         data = _read_json(self.path)
         cooldown_until = _parse_dt(data.get("cooldown_until"))
-        if cooldown_until and cooldown_until > datetime.now():
+        if cooldown_until and cooldown_until > datetime.now(tz=timezone.utc):
             return GlobalRiskDecision(
                 skip=True,
                 reason=(data.get("reason") or "检测到风控，等待人工处理"),
@@ -89,7 +99,7 @@ class GlobalRiskControlGuard:
         return GlobalRiskDecision(skip=False, reason="", cooldown_until=None)
 
     def activate(self, *, task_name: str, keyword: str, reason: str) -> None:
-        now = datetime.now()
+        now = datetime.now(tz=timezone.utc)
         payload = {
             "active": True,
             "task_name": task_name,
@@ -106,7 +116,7 @@ class GlobalRiskControlGuard:
             "task_name": None,
             "keyword": None,
             "reason": None,
-            "updated_at": datetime.now().isoformat(),
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
             "cooldown_until": None,
         }
         _write_json(self.path, payload)

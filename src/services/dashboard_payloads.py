@@ -126,7 +126,7 @@ def _resolve_task(
     )
 
 
-def _collect_record_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _collect_record_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:  # NOTE: currently unused, retained for potential future use
     latest_crawl_time: datetime | None = None
     latest_record: dict[str, Any] | None = None
     latest_recommendation: dict[str, Any] | None = None
@@ -155,8 +155,6 @@ def _collect_record_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             latest_recommendation.get("爬取时间") if latest_recommendation else None
         )
         if latest_recommendation is None or (crawl_time and recommendation_time and crawl_time > recommendation_time):
-            latest_recommendation = record
-        elif latest_recommendation is None and crawl_time:
             latest_recommendation = record
 
     return {

@@ -85,6 +85,7 @@ async function handleDeleteResults() {
   try {
     await deleteSelectedFile(selectedFile.value)
     toast({ title: t('results.filters.resultDeleted') })
+    refreshResults()
   } catch (e) {
     toast({
       title: t('results.filters.deleteFailed'),
@@ -103,7 +104,7 @@ async function handleDeleteResults() {
       <h1 class="text-lg font-bold text-gray-800">
         {{ t('results.title') }}
         <span v-if="totalItems > 0" class="ml-2 text-sm font-normal text-slate-400">
-          {{ totalItems }} 条结果
+          {{ t('results.totalItems', { count: totalItems }) }}
         </span>
       </h1>
       <button
@@ -111,7 +112,7 @@ async function handleDeleteResults() {
         class="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
         @click="insightsExpanded = !insightsExpanded"
       >
-        价格洞察
+        {{ t('results.priceInsights') }}
         <component :is="insightsExpanded ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
       </button>
     </div>

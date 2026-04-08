@@ -3,12 +3,16 @@
 负责读取和更新 .env 文件，并在读取时回退到运行时环境变量
 """
 import contextlib
+import fcntl
+import logging
 import os
 import re
 from typing import Dict, List, Optional
 from pathlib import Path
 
 from dotenv import dotenv_values
+
+logger = logging.getLogger(__name__)
 
 
 _PLAIN_ENV_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9_./:-]+$")
@@ -39,7 +43,12 @@ class EnvManager:
         }
 
     def get_value(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """获取单个环境变量的值，优先返回运行时环境变量"""
+        """获取单个环境变量的值。
+
+        Priority: os.environ (runtime) > .env file > default.
+        Runtime env vars take precedence so that Docker/CI overrides work
+        without touching the file.
+        """
         runtime_value = os.getenv(key)
         if runtime_value is not None:
             return runtime_value
@@ -64,7 +73,7 @@ class EnvManager:
                 existing_vars.pop(key, None)
             return self._write_env(existing_vars)
         except Exception as e:
-            print(f"更新环境变量失败: {e}")
+            logger.error("更新环境变量失败: %s", e)
             return False
 
     def set_value(self, key: str, value: str) -> bool:
@@ -79,21 +88,29 @@ class EnvManager:
                 existing_vars.pop(key, None)
             return self._write_env(existing_vars)
         except Exception as e:
-            print(f"删除环境变量失败: {e}")
+            logger.error("删除环境变量失败: %s", e)
             return False
 
     def _write_env(self, env_vars: Dict[str, str]) -> bool:
-        """原子写入环境变量到文件（先写临时文件再 rename）"""
+        """原子写入环境变量到文件（先写临时文件再 rename）。
+
+        NOTE: Writing rebuilds the file from key-value pairs; any comments,
+        blank lines, or ordering from the original file are lost.
+        """
         import tempfile
         try:
             dir_path = os.path.dirname(self.env_file) or "."
             fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".env.tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    for key, value in env_vars.items():
-                        f.write(f"{key}={self._serialize_value(value)}\n")
-                    f.flush()
-                    os.fsync(f.fileno())
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        for key, value in env_vars.items():
+                            f.write(f"{key}={self._serialize_value(value)}\n")
+                        f.flush()
+                        os.fsync(f.fileno())
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 os.replace(tmp_path, self.env_file)
             except BaseException:
                 with contextlib.suppress(OSError):
@@ -101,10 +118,15 @@ class EnvManager:
                 raise
             return True
         except Exception as e:
-            print(f"写入 .env 文件失败: {e}")
+            logger.error("写入 .env 文件失败: %s", e)
             return False
 
     def _serialize_value(self, value: str) -> str:
+        """Serialize a value for .env file.
+
+        NOTE: `$` characters in values are NOT escaped; some .env loaders
+        (e.g. docker-compose) may interpret them as variable references.
+        """
         text = str(value)
         if text == "":
             return ""

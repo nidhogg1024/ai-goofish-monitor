@@ -2,16 +2,25 @@
 统一配置管理模块
 使用 Pydantic 进行类型安全的配置管理
 """
+import logging
+import os
+import secrets
+from typing import Optional
+
+from pydantic import Field
+
+# pydantic-settings v2 ships BaseSettings in its own package;
+# fall back to pydantic v1 built-in for older stacks.
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
     _USING_PYDANTIC_SETTINGS = True
 except ImportError:
-    from pydantic import BaseSettings
+    from pydantic import BaseSettings  # type: ignore[no-redef]
     _USING_PYDANTIC_SETTINGS = False
-from pydantic import Field
-from typing import Optional
-import os
+
 from src.services.ai_base_url import normalize_openai_base_url
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
@@ -103,8 +112,10 @@ class ScraperSettings(_EnvSettings):
 class AppSettings(_EnvSettings):
     """应用主配置"""
     server_port: int = _env_field(8000, "SERVER_PORT")
+    server_host: str = _env_field("0.0.0.0", "SERVER_HOST")
+    cors_origins: str = _env_field("*", "CORS_ORIGINS")
     web_username: str = _env_field("admin", "WEB_USERNAME")
-    web_password: str = _env_field("admin123", "WEB_PASSWORD")
+    web_password: str = _env_field("", "WEB_PASSWORD")
     task_log_retention_days: int = _env_field(7, "TASK_LOG_RETENTION_DAYS", ge=1)
     scheduler_max_concurrent_tasks: int = _env_field(2, "SCHEDULER_MAX_CONCURRENT_TASKS", ge=1)
     scheduler_jitter_seconds: int = _env_field(45, "SCHEDULER_JITTER_SECONDS", ge=0)
@@ -118,7 +129,14 @@ class AppSettings(_EnvSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # 创建必要的目录
+        if not self.web_password:
+            self.web_password = secrets.token_urlsafe(16)
+            logger.warning(
+                "WEB_PASSWORD 未配置，已生成随机密码。"
+                "请在 .env 中设置 WEB_PASSWORD 以固定密码。"
+            )
+
+    def ensure_directories(self) -> None:
         os.makedirs(self.image_save_dir, exist_ok=True)
 
 
@@ -134,7 +152,12 @@ def get_settings() -> AppSettings:
 
 
 def reload_settings() -> None:
-    """重新加载全局配置实例"""
+    """重新加载全局配置实例。
+
+    Updates module-level references so that code importing `settings` etc.
+    at module load time sees the new values.  Note: any local variable that
+    captured the old object before reload will remain stale.
+    """
     global _settings_instance, settings, ai_settings, notification_settings, scraper_settings
     from dotenv import load_dotenv
     from src.infrastructure.config.env_manager import env_manager
@@ -149,6 +172,7 @@ def reload_settings() -> None:
 
 # 导出便捷访问的配置实例
 settings = get_settings()
+settings.ensure_directories()
 ai_settings = AISettings()
 notification_settings = NotificationSettings()
 scraper_settings = ScraperSettings()

@@ -1,6 +1,7 @@
 """
 日志管理路由
 """
+import logging
 import os
 import re
 from datetime import datetime
@@ -12,9 +13,13 @@ from src.api.dependencies import get_task_service
 from src.services.task_service import TaskService
 from src.utils import resolve_task_log_path
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 LOG_TIMESTAMP_RE = re.compile(r"^\[\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+
+MAX_TASK_IDS_PER_REQUEST = 50
+MAX_LOG_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 def _parse_task_ids_param(task_id: Optional[int], task_ids: Optional[str]) -> list[int]:
@@ -24,9 +29,11 @@ def _parse_task_ids_param(task_id: Optional[int], task_ids: Optional[str]) -> li
             value = part.strip()
             if value.isdigit():
                 resolved.append(int(value))
+            if len(resolved) >= MAX_TASK_IDS_PER_REQUEST:
+                break
     if task_id is not None:
         resolved.append(task_id)
-    return sorted(set(resolved))
+    return sorted(set(resolved))[:MAX_TASK_IDS_PER_REQUEST]
 
 
 def _extract_line_timestamp(line: str) -> datetime | None:
@@ -40,8 +47,23 @@ def _extract_line_timestamp(line: str) -> datetime | None:
 
 
 async def _read_all_log_lines(log_file_path: str) -> list[str]:
-    async with aiofiles.open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
-        content = await f.read()
+    try:
+        file_size = os.path.getsize(log_file_path)
+        if file_size > MAX_LOG_FILE_BYTES:
+            logger.warning(
+                "日志文件 %s 过大 (%d bytes)，只读取最后 %d bytes",
+                log_file_path, file_size, MAX_LOG_FILE_BYTES,
+            )
+            async with aiofiles.open(log_file_path, 'rb') as f:
+                await f.seek(max(0, file_size - MAX_LOG_FILE_BYTES))
+                raw = await f.read()
+            content = raw.decode('utf-8', errors='replace')
+        else:
+            async with aiofiles.open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = await f.read()
+    except (OSError, IOError) as e:
+        logger.warning("读取日志文件失败 %s: %s", log_file_path, e)
+        return []
     if not content:
         return []
     return content.splitlines()
@@ -54,12 +76,16 @@ async def _load_task_logs(task_service: TaskService, task_ids: list[int]) -> lis
         if not task:
             continue
         log_file_path = resolve_task_log_path(current_task_id, task.task_name)
-        if not os.path.exists(log_file_path):
+        try:
+            if not os.path.exists(log_file_path):
+                task_logs.append((current_task_id, task.task_name, [], 0))
+                continue
+            lines = await _read_all_log_lines(log_file_path)
+            file_size = os.path.getsize(log_file_path)
+            task_logs.append((current_task_id, task.task_name, lines, file_size))
+        except (OSError, IOError) as e:
+            logger.warning("读取任务 %d 日志失败: %s", current_task_id, e)
             task_logs.append((current_task_id, task.task_name, [], 0))
-            continue
-        lines = await _read_all_log_lines(log_file_path)
-        file_size = os.path.getsize(log_file_path)
-        task_logs.append((current_task_id, task.task_name, lines, file_size))
     return task_logs
 
 
@@ -158,14 +184,20 @@ async def get_logs(
             "new_pos": response["new_pos"],
         }
 
-    task = await task_service.get_task(task_id)
+    single_task_id = resolved_task_ids[0] if resolved_task_ids else task_id
+    if single_task_id is None:
+        return JSONResponse(content={
+            "new_content": "请选择任务后查看日志。",
+            "new_pos": 0
+        })
+    task = await task_service.get_task(single_task_id)
     if not task:
         return JSONResponse(status_code=404, content={
             "new_content": "任务不存在或已删除。",
             "new_pos": 0
         })
 
-    log_file_path = resolve_task_log_path(task_id, task.task_name)
+    log_file_path = resolve_task_log_path(single_task_id, task.task_name)
 
     if not os.path.exists(log_file_path):
         return JSONResponse(content={

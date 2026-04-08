@@ -1,9 +1,16 @@
 """
 结果文件管理路由
 """
+import logging
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
+
+_SORT_BY_WHITELIST = {"crawl_time", "price", "title", "item_id", "created_at", "keyword_hit_count"}
 
 from src.services.price_history_service import build_price_history_insights
 from src.domain.models.task import Task
@@ -31,6 +38,37 @@ from src.services.task_service import TaskService
 router = APIRouter(prefix="/api/results", tags=["results"])
 
 DEFAULT_EXPORT_FILENAME = "export.csv"
+
+
+def _validate_sort_by(sort_by: str) -> str:
+    if sort_by not in _SORT_BY_WHITELIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效排序字段: {sort_by}，允许值: {', '.join(sorted(_SORT_BY_WHITELIST))}",
+        )
+    return sort_by
+
+
+def _resolve_recommended_flags(
+    recommended_only: bool,
+    ai_recommended_only: bool,
+    keyword_recommended_only: bool,
+) -> tuple[bool, bool]:
+    """Resolve legacy recommended_only into specific flags. Returns (ai, keyword)."""
+    if ai_recommended_only and keyword_recommended_only:
+        raise HTTPException(status_code=400, detail="AI推荐筛选与关键词推荐筛选不能同时开启。")
+    if recommended_only and not ai_recommended_only and not keyword_recommended_only:
+        ai_recommended_only = True
+    return ai_recommended_only, keyword_recommended_only
+
+
+def _validate_result_path(filename: str) -> None:
+    """Strict path traversal validation for result filenames."""
+    if ".." in filename or filename.startswith("/"):
+        raise HTTPException(status_code=400, detail="非法的文件路径")
+    resolved = os.path.realpath(os.path.join("results", filename))
+    if not resolved.startswith(os.path.realpath("results")):
+        raise HTTPException(status_code=400, detail="非法的文件路径")
 
 
 def _build_download_headers(export_name: str) -> dict[str, str]:
@@ -86,10 +124,10 @@ async def query_results_by_scope(
     sort_order: str = Query("desc"),
     task_service: TaskService = Depends(get_task_service),
 ):
-    if ai_recommended_only and keyword_recommended_only:
-        raise HTTPException(status_code=400, detail="AI推荐筛选与关键词推荐筛选不能同时开启。")
-    if recommended_only and not ai_recommended_only and not keyword_recommended_only:
-        ai_recommended_only = True
+    _validate_sort_by(sort_by)
+    ai_recommended_only, keyword_recommended_only = _resolve_recommended_flags(
+        recommended_only, ai_recommended_only, keyword_recommended_only,
+    )
 
     tasks = await task_service.get_all_tasks()
     scoped_tasks = _filter_tasks_by_scope(
@@ -167,10 +205,9 @@ async def get_result_files():
 @router.get("/files/{filename:path}")
 async def download_result_file(filename: str):
     """下载指定的结果文件"""
-    if ".." in filename or filename.startswith("/"):
-        return {"error": "非法的文件路径"}
+    _validate_result_path(filename)
     if not filename.endswith(".jsonl") or not await result_file_exists(filename):
-        return {"error": "文件不存在"}
+        raise HTTPException(status_code=404, detail="文件不存在")
     return Response(
         content=await build_result_ndjson(filename),
         media_type="application/x-ndjson",
@@ -203,11 +240,10 @@ async def get_result_file_content(
     sort_order: str = Query("desc"),
 ):
     """读取指定的 .jsonl 文件内容，支持分页、筛选和排序"""
-    if ai_recommended_only and keyword_recommended_only:
-        raise HTTPException(status_code=400, detail="AI推荐筛选与关键词推荐筛选不能同时开启。")
-
-    if recommended_only and not ai_recommended_only and not keyword_recommended_only:
-        ai_recommended_only = True
+    _validate_sort_by(sort_by)
+    ai_recommended_only, keyword_recommended_only = _resolve_recommended_flags(
+        recommended_only, ai_recommended_only, keyword_recommended_only,
+    )
 
     try:
         validate_result_filename(filename)
@@ -226,7 +262,7 @@ async def get_result_file_content(
         raise HTTPException(status_code=500, detail=f"读取结果文件时出错: {exc}")
     if total_items <= 0 and not await result_file_exists(filename):
         raise HTTPException(status_code=404, detail="结果文件未找到")
-    paginated_results = enrich_records_with_price_insight(items, filename)
+    paginated_results = await enrich_records_with_price_insight(items, filename)
 
     return {
         "total_items": total_items,
@@ -255,11 +291,12 @@ async def export_result_file_content(
     sort_by: str = Query("crawl_time"),
     sort_order: str = Query("desc"),
 ):
-    if ai_recommended_only and keyword_recommended_only:
-        raise HTTPException(status_code=400, detail="AI推荐筛选与关键词推荐筛选不能同时开启。")
-    if recommended_only and not ai_recommended_only and not keyword_recommended_only:
-        ai_recommended_only = True
+    _validate_sort_by(sort_by)
+    ai_recommended_only, keyword_recommended_only = _resolve_recommended_flags(
+        recommended_only, ai_recommended_only, keyword_recommended_only,
+    )
 
+    results = []
     try:
         validate_result_filename(filename)
         results = await load_all_result_records(
@@ -270,12 +307,13 @@ async def export_result_file_content(
             sort_order=sort_order,
         )
         csv_text = build_results_csv(
-            enrich_records_with_price_insight(results, filename)
+            await enrich_records_with_price_insight(results, filename)
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"导出结果文件时出错: {exc}")
+        logger.exception("导出结果文件时出错: %s", exc)
+        raise HTTPException(status_code=500, detail="导出结果文件时出错")
     if not results and not await result_file_exists(filename):
         raise HTTPException(status_code=404, detail="结果文件未找到")
 

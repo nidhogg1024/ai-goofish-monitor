@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useLogs } from '@/composables/useLogs'
 import { useTasks } from '@/composables/useTasks'
+import { normalizeTasks } from '@/lib/normalizeTask'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -26,14 +27,14 @@ const selectedGroup = ref<string | null>(null)
 const isPrepending = ref(false)
 const lastScrollTop = ref(0)
 const lastScrollHeight = ref(0)
+const MAX_DISPLAY_CHARS = 200_000
+const displayLogs = computed(() => {
+  const raw = logs.value
+  if (raw.length <= MAX_DISPLAY_CHARS) return raw
+  return raw.slice(-MAX_DISPLAY_CHARS)
+})
 
-const normalizedTasks = computed(() =>
-  tasks.value.map((task) => ({
-    ...task,
-    category: task.category || '未分类',
-    group_name: task.group_name || '默认任务组',
-  })),
-)
+const normalizedTasks = computed(() => normalizeTasks(tasks.value))
 
 const categoryOptions = computed(() =>
   Array.from(new Set(normalizedTasks.value.map((task) => task.category))).sort((a, b) =>
@@ -66,9 +67,9 @@ const scopedTaskIds = computed(() =>
 )
 
 const logContext = computed(() => ({
-  category: selectedCategory.value || activeTask.value?.category || '全部分类',
-  group: selectedGroup.value || activeTask.value?.group_name || '全部任务组',
-  taskName: activeTask.value?.task_name || (filteredTasks.value.length ? '整组运行日志' : '未选择任务'),
+  category: selectedCategory.value || activeTask.value?.category || t('logs.allCategories'),
+  group: selectedGroup.value || activeTask.value?.group_name || t('logs.allGroups'),
+  taskName: activeTask.value?.task_name || (filteredTasks.value.length ? t('logs.groupLogs') : t('logs.noTaskSelected')),
   runningCount: filteredTasks.value.filter((task) => task.is_running).length,
   taskCount: filteredTasks.value.length,
 }))
@@ -205,29 +206,29 @@ async function handleClearLogs() {
 </script>
 
 <template>
-  <div class="flex h-[calc(100vh-100px)] flex-col gap-4">
+  <div class="flex min-h-0 flex-1 flex-col gap-4">
     <div class="app-surface p-4">
       <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div class="flex flex-col gap-4">
           <div>
             <h1 class="text-2xl font-bold text-gray-800">{{ t('logs.title') }}</h1>
             <p class="mt-1 text-sm text-slate-500">
-              运行中心按分类、任务组和任务收拢日志，避免故障排查时来回跳页。
+              {{ t('logs.viewDescription') }}
             </p>
           </div>
 
           <div class="grid gap-3 lg:grid-cols-3">
             <div class="flex flex-col gap-2">
-              <Label class="text-sm text-gray-600">分类</Label>
+              <Label class="text-sm text-gray-600">{{ t('logs.categoryLabel') }}</Label>
               <Select
                 :model-value="selectedCategory || '__all__'"
                 @update:model-value="(value) => selectedCategory = value === '__all__' ? null : value as string"
               >
                 <SelectTrigger class="w-full">
-                  <SelectValue placeholder="全部分类" />
+                  <SelectValue :placeholder="t('logs.allCategories')" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__all__">全部分类</SelectItem>
+                  <SelectItem value="__all__">{{ t('logs.allCategories') }}</SelectItem>
                   <SelectItem v-for="category in categoryOptions" :key="category" :value="category">
                     {{ category }}
                   </SelectItem>
@@ -236,16 +237,16 @@ async function handleClearLogs() {
             </div>
 
             <div class="flex flex-col gap-2">
-              <Label class="text-sm text-gray-600">任务组</Label>
+              <Label class="text-sm text-gray-600">{{ t('logs.taskGroupLabel') }}</Label>
               <Select
                 :model-value="selectedGroup || '__all__'"
                 @update:model-value="(value) => selectedGroup = value === '__all__' ? null : value as string"
               >
                 <SelectTrigger class="w-full">
-                  <SelectValue placeholder="全部任务组" />
+                  <SelectValue :placeholder="t('logs.allGroups')" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__all__">全部任务组</SelectItem>
+                  <SelectItem value="__all__">{{ t('logs.allGroups') }}</SelectItem>
                   <SelectItem v-for="group in groupOptions" :key="group" :value="group">
                     {{ group }}
                   </SelectItem>
@@ -293,19 +294,19 @@ async function handleClearLogs() {
 
     <div class="grid gap-4 md:grid-cols-4">
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">分类</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('logs.categoryLabel') }}</div>
         <div class="mt-2 text-lg font-black text-slate-800">{{ logContext.category }}</div>
       </div>
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">任务组</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('logs.taskGroupLabel') }}</div>
         <div class="mt-2 text-lg font-black text-slate-800">{{ logContext.group }}</div>
       </div>
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">组内任务</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('logs.groupTasks') }}</div>
         <div class="mt-2 text-2xl font-black text-slate-800">{{ logContext.taskCount }}</div>
       </div>
       <div class="app-surface p-4">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">运行中</div>
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ t('logs.running') }}</div>
         <div class="mt-2 text-2xl font-black text-emerald-600">{{ logContext.runningCount }}</div>
       </div>
     </div>
@@ -314,12 +315,12 @@ async function handleClearLogs() {
       <div>
         <div class="text-sm font-semibold text-slate-800">{{ logContext.taskName }}</div>
         <div class="mt-1 text-sm text-slate-500">
-          从这里直接回到任务配置，或者查看对应任务的结果情报。
+          {{ t('logs.contextHint') }}
         </div>
       </div>
       <div class="flex flex-wrap gap-2">
-        <Button variant="outline" @click="openTasksView">回到任务组</Button>
-        <Button variant="outline" :disabled="!selectedTaskId" @click="openResultsView">查看任务情报</Button>
+        <Button variant="outline" @click="openTasksView">{{ t('logs.goToTasks') }}</Button>
+        <Button variant="outline" :disabled="!selectedTaskId" @click="openResultsView">{{ t('logs.viewResults') }}</Button>
       </div>
     </div>
 
@@ -329,7 +330,7 @@ async function handleClearLogs() {
           ref="logContainer"
           @scroll="handleScroll"
           class="absolute inset-0 p-4 bg-gray-950 text-gray-100 font-mono text-sm overflow-auto whitespace-pre-wrap break-all"
-        >{{ logs }}</pre>
+        >{{ displayLogs }}</pre>
       </CardContent>
     </Card>
 

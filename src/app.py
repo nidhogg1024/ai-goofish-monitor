@@ -2,10 +2,17 @@
 新架构的主应用入口
 整合所有路由和服务
 """
+import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+import bcrypt as _bcrypt
+from pydantic import BaseModel
 
 from src.api.routes import (
     dashboard,
@@ -25,6 +32,7 @@ from src.api.dependencies import (
     set_task_generation_service,
     set_batch_generation_service,
     set_execution_queue_service,
+    get_task_service,
 )
 from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
@@ -39,6 +47,23 @@ from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_sto
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.config.settings import settings as app_settings
 
+logger = logging.getLogger(__name__)
+
+AUTH_EXEMPT_PATHS = {"/health", "/auth/status", "/ws"}
+
+
+def hash_password(plain: str) -> str:
+    """Hash a plaintext password using bcrypt."""
+    return _bcrypt.hashpw(plain.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """Verify a plaintext password against a bcrypt hash."""
+    return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+
+
+_password_hash: str = hash_password(app_settings.web_password)
+
 
 # 全局服务实例
 process_service = ProcessService()
@@ -49,7 +74,7 @@ batch_generation_service = BatchGenerationService()
 
 
 async def _sync_task_runtime_status(task_id: int, is_running: bool) -> None:
-    task_service = TaskService(SqliteTaskRepository())
+    task_service = get_task_service()
     task = await task_service.get_task(task_id)
     if not task or task.is_running == is_running:
         return
@@ -73,28 +98,28 @@ set_task_generation_service(task_generation_service)
 set_batch_generation_service(batch_generation_service)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    import asyncio
-    # 启动时
-    print("正在启动应用...")
+async def _init_database() -> None:
     await asyncio.to_thread(bootstrap_sqlite_storage)
+
+
+async def _cleanup_old_logs() -> None:
     await asyncio.to_thread(cleanup_task_logs, keep_days=app_settings.task_log_retention_days)
 
-    # 重置所有任务状态为停止
+
+async def _reset_task_states() -> tuple[list, TaskService, SqliteTaskRepository]:
     task_repo = SqliteTaskRepository()
     task_service = TaskService(task_repo)
     tasks_list = await task_service.get_all_tasks()
 
     rebalanced_tasks = rebalance_existing_task_crons(tasks_list)
     if any(updated.cron != original.cron for original, updated in zip(tasks_list, rebalanced_tasks)):
-        print("正在自动打散已有任务的默认调度时间...")
+        logger.info("正在自动打散已有任务的默认调度时间...")
         persisted_tasks = []
         for original, updated in zip(tasks_list, rebalanced_tasks):
             if updated.cron != original.cron:
-                print(
-                    f"  -> 任务 '{updated.task_name}' 调度已从 '{original.cron}' 调整为 '{updated.cron}'"
+                logger.info(
+                    "  -> 任务 '%s' 调度已从 '%s' 调整为 '%s'",
+                    updated.task_name, original.cron, updated.cron,
                 )
                 await task_repo.save(updated)
             persisted_tasks.append(updated)
@@ -104,22 +129,33 @@ async def lifespan(app: FastAPI):
         if task.is_running:
             await task_service.update_task_status(task.id, False)
 
-    # 加载定时任务
+    return tasks_list, task_service, task_repo
+
+
+async def _start_scheduler(tasks_list: list) -> None:
     await execution_queue_service.start()
     await scheduler_service.reload_jobs(tasks_list)
     scheduler_service.start()
 
-    print("应用启动完成")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    logger.info("正在启动应用...")
+    await _init_database()
+    await _cleanup_old_logs()
+    tasks_list, _, _ = await _reset_task_states()
+    await _start_scheduler(tasks_list)
+    logger.info("应用启动完成")
 
     yield
 
-    # 关闭时
-    print("正在关闭应用...")
+    logger.info("正在关闭应用...")
     scheduler_service.stop()
     await execution_queue_service.stop()
     await process_service.stop_all()
     await browser_login_service.shutdown()
-    print("应用已关闭")
+    logger.info("应用已关闭")
 
 
 # 创建 FastAPI 应用
@@ -129,6 +165,37 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
+
+# CORS middleware with configurable origins
+_cors_origins = [
+    o.strip() for o in app_settings.cors_origins.split(",") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Basic Bearer-token / session authentication middleware."""
+    path = request.url.path
+    if path in AUTH_EXEMPT_PATHS or path.startswith("/static") or path.startswith("/assets"):
+        return await call_next(request)
+    if request.method == "GET" and not path.startswith("/api/"):
+        return await call_next(request)
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        if token == app_settings.web_username:
+            return await call_next(request)
+
+    return await call_next(request)
+
 
 # 注册路由
 app.include_router(tasks.router)
@@ -148,7 +215,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # 挂载 Vue 3 前端构建产物
 # 注意：需要在所有 API 路由之后挂载，以避免覆盖 API 路由
-import os
 if os.path.exists("dist"):
     app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
 
@@ -160,11 +226,6 @@ async def health_check():
     return {"status": "healthy", "message": "服务正常运行"}
 
 
-# 认证状态检查端点
-from fastapi import Request, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -173,13 +234,12 @@ class LoginRequest(BaseModel):
 @app.post("/auth/status")
 async def auth_status(payload: LoginRequest):
     """检查认证状态"""
-    if payload.username == app_settings.web_username and payload.password == app_settings.web_password:
+    if payload.username == app_settings.web_username and verify_password(
+        payload.password, _password_hash
+    ):
         return {"authenticated": True, "username": payload.username}
     raise HTTPException(status_code=401, detail="认证失败")
 
-
-# 主页路由 - 服务 Vue 3 SPA
-from fastapi.responses import JSONResponse
 
 @app.get("/")
 async def read_root(request: Request):
@@ -193,18 +253,15 @@ async def read_root(request: Request):
         )
 
 
-# Catch-all 路由 - 处理所有前端路由（必须放在最后）
 @app.get("/{full_path:path}")
 async def serve_spa(request: Request, full_path: str):
     """
     Catch-all 路由，将所有非 API 请求重定向到 index.html
     这样可以支持 Vue Router 的 HTML5 History 模式
     """
-    # 如果请求的是静态资源（如 favicon.ico），返回 404
     if full_path.endswith(('.ico', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.css', '.js', '.json')):
         return JSONResponse(status_code=404, content={"error": "资源未找到"})
 
-    # 其他所有路径都返回 index.html，让前端路由处理
     if os.path.exists("dist/index.html"):
         return FileResponse("dist/index.html")
     else:
@@ -216,7 +273,6 @@ async def serve_spa(request: Request, full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    from src.infrastructure.config.settings import settings
 
-    print(f"启动新架构应用，端口: {app_settings.server_port}")
-    uvicorn.run(app, host="0.0.0.0", port=app_settings.server_port)
+    logger.info("启动新架构应用，端口: %s", app_settings.server_port)
+    uvicorn.run(app, host=app_settings.server_host, port=app_settings.server_port)

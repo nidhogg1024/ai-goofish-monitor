@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import math
 import os
 import random
@@ -14,18 +15,23 @@ from requests.exceptions import HTTPError
 
 from src.services.result_storage_service import save_result_record
 
+logger = logging.getLogger(__name__)
+
 
 def retry_on_failure(retries=3, delay=5):
     """
     一个通用的异步重试装饰器，增加了对HTTP错误的详细日志记录。
+    重试耗尽后抛出最后一次异常而非静默返回 None。
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            last_exception = None
             for i in range(retries):
                 try:
                     return await func(*args, **kwargs)
                 except (APIStatusError, HTTPError) as e:
+                    last_exception = e
                     print(f"函数 {func.__name__} 第 {i + 1}/{retries} 次尝试失败，发生HTTP错误。")
                     if hasattr(e, 'status_code'):
                         print(f"  - 状态码 (Status Code): {e.status_code}")
@@ -34,8 +40,10 @@ def retry_on_failure(retries=3, delay=5):
                         print(
                             f"  - 返回值 (Response): {response_text[:300]}{'...' if len(response_text) > 300 else ''}")
                 except json.JSONDecodeError as e:
+                    last_exception = e
                     print(f"函数 {func.__name__} 第 {i + 1}/{retries} 次尝试失败: JSON解析错误 - {e}")
                 except Exception as e:
+                    last_exception = e
                     print(f"函数 {func.__name__} 第 {i + 1}/{retries} 次尝试失败: {type(e).__name__} - {e}")
 
                 if i < retries - 1:
@@ -43,12 +51,12 @@ def retry_on_failure(retries=3, delay=5):
                     await asyncio.sleep(delay)
 
             print(f"函数 {func.__name__} 在 {retries} 次尝试后彻底失败。")
-            return None
+            raise last_exception
         return wrapper
     return decorator
 
 
-async def safe_get(data, *keys, default="暂无"):
+def safe_get(data, *keys, default="暂无"):
     """安全获取嵌套字典值"""
     for key in keys:
         try:
@@ -124,8 +132,8 @@ async def save_to_jsonl(data_record: dict, keyword: str):
     try:
         return await save_result_record(data_record, keyword)
     except Exception as e:
-        print(f"写入 SQLite 结果记录出错: {e}")
-        return False
+        logger.error("写入 SQLite 结果记录出错: %s", e)
+        raise
 
 
 def format_registration_days(total_days: int) -> str:
