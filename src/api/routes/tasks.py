@@ -7,6 +7,7 @@ from typing import List
 import os
 import aiofiles
 from src.api.dependencies import (
+    get_execution_queue_service,
     get_process_service,
     get_scheduler_service,
     get_task_generation_service,
@@ -16,10 +17,12 @@ from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
+from src.services.execution_queue_service import ExecutionQueueService
 from src.services.task_generation_runner import (
     build_task_create,
     run_ai_generation_job,
 )
+from src.services.task_schedule_service import assign_scattered_cron, resolve_request_cron
 from src.services.task_intent_service import enrich_generate_request
 from src.services.task_payloads import serialize_task, serialize_tasks
 from src.domain.models.task import TaskCreate, TaskUpdate, TaskGenerateRequest
@@ -60,37 +63,48 @@ def _validate_final_account_strategy(existing_task, task_update: TaskUpdate) -> 
 async def get_tasks(
     service: TaskService = Depends(get_task_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """获取所有任务"""
     tasks = await service.get_all_tasks()
-    return serialize_tasks(tasks, scheduler_service)
+    return serialize_tasks(tasks, scheduler_service, execution_queue_service)
 @router.get("/{task_id}", response_model=dict)
 async def get_task(
     task_id: int,
     service: TaskService = Depends(get_task_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """获取单个任务"""
     task = await service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务未找到")
-    return serialize_task(task, scheduler_service)
+    return serialize_task(task, scheduler_service, execution_queue_service)
 @router.post("/", response_model=dict)
 async def create_task(
     task_create: TaskCreate,
     service: TaskService = Depends(get_task_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """创建新任务"""
+    existing_tasks = await service.get_all_tasks()
+    task_create.cron = assign_scattered_cron(
+        task_create.cron,
+        existing_tasks=existing_tasks,
+        category=task_create.category,
+        group_name=task_create.group_name,
+    )
     task = await service.create_task(task_create)
     await _reload_scheduler_if_needed(service, scheduler_service)
-    return {"message": "任务创建成功", "task": serialize_task(task, scheduler_service)}
+    return {"message": "任务创建成功", "task": serialize_task(task, scheduler_service, execution_queue_service)}
 @router.post("/generate", response_model=dict)
 async def generate_task(
     req: TaskGenerateRequest,
     service: TaskService = Depends(get_task_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
     generation_service: TaskGenerationService = Depends(get_task_generation_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """创建任务。AI模式会生成分析标准，关键词模式直接保存规则。"""
     req = await enrich_generate_request(req)
@@ -117,9 +131,11 @@ async def generate_task(
                 },
             )
 
-        task = await service.create_task(build_task_create(req, ""))
+        all_tasks = await service.get_all_tasks()
+        resolved_cron = resolve_request_cron(req, existing_tasks=all_tasks)
+        task = await service.create_task(build_task_create(req, "", cron=resolved_cron))
         await _reload_scheduler_if_needed(service, scheduler_service)
-        return {"message": "任务创建成功。", "task": serialize_task(task, scheduler_service)}
+        return {"message": "任务创建成功。", "task": serialize_task(task, scheduler_service, execution_queue_service)}
 
     except HTTPException:
         raise
@@ -145,6 +161,7 @@ async def update_task(
     task_update: TaskUpdate,
     service: TaskService = Depends(get_task_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """更新任务"""
     try:
@@ -210,7 +227,7 @@ async def update_task(
                 raise HTTPException(status_code=500, detail=error_msg)
         task = await service.update_task(task_id, task_update)
         await _reload_scheduler_if_needed(service, scheduler_service)
-        return {"message": "任务更新成功", "task": serialize_task(task, scheduler_service)}
+        return {"message": "任务更新成功", "task": serialize_task(task, scheduler_service, execution_queue_service)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 @router.delete("/{task_id}", response_model=dict)
@@ -255,7 +272,7 @@ async def delete_task(
 async def start_task(
     task_id: int,
     task_service: TaskService = Depends(get_task_service),
-    process_service: ProcessService = Depends(get_process_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """启动单个任务"""
     task = await task_service.get_task(task_id)
@@ -265,19 +282,21 @@ async def start_task(
         raise HTTPException(status_code=400, detail="任务已被禁用，无法启动")
     if task.is_running:
         raise HTTPException(status_code=400, detail="任务已在运行中")
-    success = await process_service.start_task(task_id, task.task_name)
-    if not success:
-        raise HTTPException(status_code=500, detail="启动任务失败")
-    return {"message": f"任务 '{task.task_name}' 已启动"}
+    queued = await execution_queue_service.enqueue_task(task_id, task.task_name, source="manual")
+    if not queued:
+        raise HTTPException(status_code=400, detail="任务已在运行中或已在队列中")
+    return {"message": f"任务 '{task.task_name}' 已加入执行队列"}
 @router.post("/stop/{task_id}", response_model=dict)
 async def stop_task(
     task_id: int,
     task_service: TaskService = Depends(get_task_service),
     process_service: ProcessService = Depends(get_process_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     """停止单个任务"""
     task = await task_service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务未找到")
+    execution_queue_service.cancel_task(task_id)
     await process_service.stop_task(task_id)
     return {"message": f"任务ID {task_id} 已发送停止信号"}

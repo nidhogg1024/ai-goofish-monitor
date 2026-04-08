@@ -33,12 +33,16 @@ const {
 
 const statCards = computed(() => [
   {
-    label: t('dashboard.stats.activeTasks'),
-    value: String(stats.value.enabledTasks),
-    detail: t('dashboard.stats.runningCount', { count: stats.value.runningTasks }),
-    icon: Activity,
+    label: t('dashboard.stats.monitoredTasks'),
+    value: String(stats.value.totalTasks),
+    detail: t('dashboard.stats.enabledAndRunning', {
+      enabled: stats.value.enabledTasks,
+      running: stats.value.runningTasks,
+    }),
+    icon: Compass,
     color: 'text-blue-500',
     bg: 'bg-blue-500/10',
+    route: { name: 'Tasks' },
   },
   {
     label: t('dashboard.stats.scannedItems'),
@@ -47,6 +51,7 @@ const statCards = computed(() => [
     icon: Search,
     color: 'text-emerald-500',
     bg: 'bg-emerald-500/10',
+    route: { name: 'Results' },
   },
   {
     label: t('dashboard.stats.recommendedItems'),
@@ -58,14 +63,18 @@ const statCards = computed(() => [
     icon: Target,
     color: 'text-amber-500',
     bg: 'bg-amber-500/10',
+    route: { name: 'Results', query: { recommended: '1' } },
   },
   {
-    label: t('dashboard.stats.monitoredTasks'),
-    value: String(stats.value.totalTasks),
-    detail: t('dashboard.stats.showAllTasks'),
-    icon: Compass,
+    label: t('dashboard.stats.activityLogs'),
+    value: String(activities.value.length),
+    detail: stats.value.lastUpdatedAt
+      ? t('dashboard.stats.lastUpdated', { time: formatRelativeTimeFromNow(stats.value.lastUpdatedAt) })
+      : t('dashboard.stats.noActivity'),
+    icon: Activity,
     color: 'text-purple-500',
     bg: 'bg-purple-500/10',
+    route: { name: 'Logs' },
   },
 ])
 
@@ -157,7 +166,8 @@ function openActivity(activity: { filename: string | null; type: string }) {
       <Card
         v-for="stat in statCards"
         :key="stat.label"
-        class="app-surface border-none transition-all hover:-translate-y-0.5"
+        class="app-surface border-none transition-all hover:-translate-y-0.5 cursor-pointer"
+        @click="router.push(stat.route)"
       >
         <CardContent class="p-6">
           <div class="flex items-center justify-between">

@@ -5,6 +5,7 @@
 from typing import List, Optional
 from src.domain.models.task import Task, TaskCreate, TaskUpdate
 from src.domain.repositories.task_repository import TaskRepository
+from src.services.task_taxonomy_service import ensure_task_taxonomy_payload
 
 
 class TaskService:
@@ -23,7 +24,8 @@ class TaskService:
 
     async def create_task(self, task_create: TaskCreate) -> Task:
         """创建新任务"""
-        task = Task(**task_create.model_dump(), is_running=False)
+        payload = ensure_task_taxonomy_payload(task_create.model_dump())
+        task = Task(**payload, is_running=False)
         return await self.repository.save(task)
 
     async def update_task(self, task_id: int, task_update: TaskUpdate) -> Task:
@@ -33,7 +35,8 @@ class TaskService:
             raise ValueError(f"任务 {task_id} 不存在")
 
         updated_task = task.apply_update(task_update)
-        return await self.repository.save(updated_task)
+        payload = ensure_task_taxonomy_payload(updated_task.model_dump())
+        return await self.repository.save(Task(**payload))
 
     async def delete_task(self, task_id: int) -> bool:
         """删除任务"""

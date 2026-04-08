@@ -31,3 +31,29 @@ def enrich_records_with_price_insight(records: list[dict], filename: str) -> lis
         )
         enriched.append(clone)
     return enriched
+
+
+def enrich_records_with_dynamic_price_insight(records: list[dict]) -> list[dict]:
+    snapshot_cache: dict[str, list[dict]] = {}
+    enriched = []
+    for record in records:
+        keyword = str(record.get("搜索关键字") or "").strip()
+        if not keyword:
+            enriched.append(record)
+            continue
+        snapshots = snapshot_cache.get(keyword)
+        if snapshots is None:
+            snapshots = load_price_snapshots(keyword)
+            snapshot_cache[keyword] = snapshots
+        if not snapshots:
+            enriched.append(record)
+            continue
+        info = record.get("商品信息", {}) or {}
+        clone = dict(record)
+        clone["price_insight"] = build_item_price_context(
+            snapshots,
+            item_id=str(info.get("商品ID") or ""),
+            current_price=parse_price_value(info.get("当前售价")),
+        )
+        enriched.append(clone)
+    return enriched

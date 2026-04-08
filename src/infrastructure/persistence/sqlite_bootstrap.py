@@ -14,9 +14,11 @@ from src.infrastructure.persistence.storage_names import (
     normalize_keyword_from_filename,
     normalize_keyword_slug,
 )
+from src.services.task_taxonomy_service import ensure_task_taxonomy
 
 
 BOOTSTRAP_LOCK = threading.Lock()
+_bootstrap_done = False
 LEGACY_CONFIG_FILE = "config.json"
 LEGACY_RESULT_DIR = "jsonl"
 LEGACY_PRICE_HISTORY_DIR = "price_history"
@@ -32,12 +34,19 @@ def bootstrap_sqlite_storage(
     legacy_result_dir: str = LEGACY_RESULT_DIR,
     legacy_price_history_dir: str = LEGACY_PRICE_HISTORY_DIR,
 ) -> None:
+    global _bootstrap_done
+    if _bootstrap_done:
+        return
     with BOOTSTRAP_LOCK:
+        if _bootstrap_done:
+            return
         with sqlite_connection(db_path) as conn:
             init_schema(conn)
+            _backfill_task_taxonomy(conn)
             _import_tasks_if_needed(conn, legacy_config_file)
             _import_results_if_needed(conn, legacy_result_dir)
             _import_price_snapshots_if_needed(conn, legacy_price_history_dir)
+        _bootstrap_done = True
 
 
 def _table_is_empty(conn, table_name: str) -> bool:
@@ -75,19 +84,28 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
     for index, raw_task in enumerate(tasks):
         if not isinstance(raw_task, dict):
             continue
+        category, group_name = ensure_task_taxonomy(
+            category=raw_task.get("category"),
+            group_name=raw_task.get("group_name"),
+            task_name=raw_task.get("task_name", ""),
+            keyword=raw_task.get("keyword", ""),
+            description=raw_task.get("description", ""),
+        )
         conn.execute(
             """
             INSERT INTO tasks (
-                id, task_name, enabled, keyword, description, analyze_images,
+                id, task_name, category, group_name, enabled, keyword, description, analyze_images,
                 max_pages, personal_only, min_price, max_price, cron,
                 ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                 account_strategy, free_shipping, new_publish_option, region,
                 decision_mode, keyword_rules_json, is_running
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 index,
                 raw_task.get("task_name", ""),
+                category,
+                group_name,
                 _as_int(raw_task.get("enabled", True)),
                 raw_task.get("keyword", ""),
                 raw_task.get("description", ""),
@@ -110,6 +128,31 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
             ),
         )
     _mark_bootstrap_completed(conn, TASKS_BOOTSTRAP_KEY)
+    conn.commit()
+
+
+def _backfill_task_taxonomy(conn) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, task_name, keyword, description, category, group_name
+        FROM tasks
+        WHERE category IS NULL OR category = '' OR group_name IS NULL OR group_name = ''
+        """
+    ).fetchall()
+    if not rows:
+        return
+    for row in rows:
+        category, group_name = ensure_task_taxonomy(
+            category=row["category"],
+            group_name=row["group_name"],
+            task_name=row["task_name"],
+            keyword=row["keyword"],
+            description=row["description"],
+        )
+        conn.execute(
+            "UPDATE tasks SET category = ?, group_name = ? WHERE id = ?",
+            (category, group_name, row["id"]),
+        )
     conn.commit()
 
 

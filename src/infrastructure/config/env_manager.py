@@ -2,6 +2,7 @@
 环境变量管理器
 负责读取和更新 .env 文件，并在读取时回退到运行时环境变量
 """
+import contextlib
 import os
 import re
 from typing import Dict, List, Optional
@@ -82,11 +83,22 @@ class EnvManager:
             return False
 
     def _write_env(self, env_vars: Dict[str, str]) -> bool:
-        """写入环境变量到文件"""
+        """原子写入环境变量到文件（先写临时文件再 rename）"""
+        import tempfile
         try:
-            with open(self.env_file, 'w', encoding='utf-8') as f:
-                for key, value in env_vars.items():
-                    f.write(f"{key}={self._serialize_value(value)}\n")
+            dir_path = os.path.dirname(self.env_file) or "."
+            fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".env.tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    for key, value in env_vars.items():
+                        f.write(f"{key}={self._serialize_value(value)}\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self.env_file)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
             return True
         except Exception as e:
             print(f"写入 .env 文件失败: {e}")

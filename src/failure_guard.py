@@ -186,6 +186,9 @@ class FailureGuard:
     def _save(self, data: dict) -> None:
         _atomic_write_json(self.path, data)
 
+    def reset_all(self) -> None:
+        self._save({"version": 1, "tasks": {}})
+
     def _update_task(self, task_key: str, updater) -> dict:
         _ensure_parent_dir(self.path)
         with open(self.path, "a+", encoding="utf-8") as fh:

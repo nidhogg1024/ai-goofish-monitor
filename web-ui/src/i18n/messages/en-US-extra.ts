@@ -76,6 +76,8 @@ const enUSExtra = {
       minPrice: 'Min Price',
       maxPrice: 'Max Price',
       maxPages: 'Search Pages',
+      firstScanMaxPages: 'First Scan Pages',
+      firstScanMaxPagesHint: 'Pages to scan on first run for broad coverage; incremental scans use Search Pages above',
       schedule: 'Schedule',
       cronPresetTab: 'Preset',
       cronCustomTab: 'Custom',

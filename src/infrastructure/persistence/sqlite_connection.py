@@ -25,6 +25,8 @@ SCHEMA_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY,
         task_name TEXT NOT NULL,
+        category TEXT,
+        group_name TEXT,
         enabled INTEGER NOT NULL,
         keyword TEXT NOT NULL,
         description TEXT,
@@ -134,7 +136,19 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 def init_schema(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
+    _ensure_tasks_column(conn, "category", "TEXT")
+    _ensure_tasks_column(conn, "group_name", "TEXT")
+    _ensure_tasks_column(conn, "search_query", "TEXT")
+    _ensure_tasks_column(conn, "first_scan_max_pages", "INTEGER DEFAULT 10")
     conn.commit()
+
+
+def _ensure_tasks_column(conn: sqlite3.Connection, column_name: str, column_type: str) -> None:
+    rows = conn.execute("PRAGMA table_info(tasks)").fetchall()
+    existing_columns = {row["name"] for row in rows}
+    if column_name in existing_columns:
+        return
+    conn.execute(f"ALTER TABLE tasks ADD COLUMN {column_name} {column_type}")
 
 
 @contextmanager

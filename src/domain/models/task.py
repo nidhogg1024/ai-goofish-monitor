@@ -13,6 +13,7 @@ from src.services.account_strategy_service import (
     clean_account_state_file,
     normalize_account_strategy,
 )
+from src.services.task_taxonomy_service import ensure_task_taxonomy
 
 
 class TaskStatus(str, Enum):
@@ -111,11 +112,15 @@ class Task(BaseModel):
 
     id: Optional[int] = None
     task_name: str
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     enabled: bool
     keyword: str
+    search_query: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     max_pages: int
+    first_scan_max_pages: int = 10
     personal_only: bool
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -161,11 +166,15 @@ class TaskCreate(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_name: str
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     enabled: bool = True
     keyword: str
+    search_query: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     max_pages: int = 3
+    first_scan_max_pages: int = 10
     personal_only: bool = True
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -195,6 +204,11 @@ class TaskCreate(BaseModel):
     def normalize_cron(cls, value):
         return _normalize_optional_string(value)
 
+    @field_validator("category", "group_name", mode="before")
+    @classmethod
+    def normalize_taxonomy_fields(cls, value):
+        return _normalize_optional_string(value)
+
     @field_validator("account_state_file", mode="before")
     @classmethod
     def normalize_account_state_file(cls, value):
@@ -219,6 +233,13 @@ class TaskCreate(BaseModel):
             raise ValueError("关键词判断模式下，至少需要一个关键词。")
         if self.account_strategy == "fixed" and not self.account_state_file:
             raise ValueError("固定账号模式下必须选择账号。")
+        self.category, self.group_name = ensure_task_taxonomy(
+            category=self.category,
+            group_name=self.group_name,
+            task_name=self.task_name,
+            keyword=self.keyword,
+            description=self.description,
+        )
         return self
 
 
@@ -228,11 +249,15 @@ class TaskUpdate(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_name: Optional[str] = None
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     enabled: Optional[bool] = None
     keyword: Optional[str] = None
+    search_query: Optional[str] = None
     description: Optional[str] = None
     analyze_images: Optional[bool] = None
     max_pages: Optional[int] = None
+    first_scan_max_pages: Optional[int] = None
     personal_only: Optional[bool] = None
     min_price: Optional[str] = None
     max_price: Optional[str] = None
@@ -261,6 +286,11 @@ class TaskUpdate(BaseModel):
     @field_validator("cron", mode="before")
     @classmethod
     def normalize_cron(cls, value):
+        return _normalize_optional_string(value)
+
+    @field_validator("category", "group_name", mode="before")
+    @classmethod
+    def normalize_taxonomy_fields(cls, value):
         return _normalize_optional_string(value)
 
     @field_validator("account_state_file", mode="before")
@@ -295,13 +325,17 @@ class TaskGenerateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_name: Optional[str] = None
+    category: Optional[str] = None
+    group_name: Optional[str] = None
     keyword: Optional[str] = None
+    search_query: Optional[str] = None
     description: Optional[str] = ""
     analyze_images: bool = True
     personal_only: bool = True
     min_price: Optional[str] = None
     max_price: Optional[str] = None
     max_pages: int = 3
+    first_scan_max_pages: int = 10
     cron: Optional[str] = None
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
@@ -324,6 +358,11 @@ class TaskGenerateRequest(BaseModel):
     @field_validator("cron", mode="before")
     @classmethod
     def empty_str_to_none(cls, value):
+        return _normalize_optional_string(value)
+
+    @field_validator("category", "group_name", mode="before")
+    @classmethod
+    def normalize_taxonomy_fields(cls, value):
         return _normalize_optional_string(value)
 
     @field_validator("cron")
@@ -359,4 +398,11 @@ class TaskGenerateRequest(BaseModel):
                 raise ValueError("关键词判断模式下，至少需要一个关键词。")
         if self.account_strategy == "fixed" and not self.account_state_file:
             raise ValueError("固定账号模式下必须选择账号。")
+        self.category, self.group_name = ensure_task_taxonomy(
+            category=self.category,
+            group_name=self.group_name,
+            task_name=self.task_name,
+            keyword=self.keyword,
+            description=self.description,
+        )
         return self

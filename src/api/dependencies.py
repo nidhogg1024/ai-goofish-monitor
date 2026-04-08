@@ -10,6 +10,7 @@ from src.services.process_service import ProcessService
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
 from src.services.batch_generation_service import BatchGenerationService
+from src.services.execution_queue_service import ExecutionQueueService
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.external.ai_client import AIClient
 
@@ -19,6 +20,27 @@ _process_service_instance = None
 _scheduler_service_instance = None
 _task_generation_service_instance = None
 _batch_generation_service_instance = None
+_execution_queue_service_instance = None
+
+
+class _NullExecutionQueueService:
+    pending_task_ids: set[int] = set()
+    active_task_ids: set[int] = set()
+
+    async def enqueue_task(self, task_id: int, task_name: str, *, source: str = "scheduler") -> bool:
+        return False
+
+    def cancel_task(self, task_id: int) -> bool:
+        return False
+
+    def snapshot(self) -> dict:
+        return {
+            "worker_count": 0,
+            "queue_size": 0,
+            "active_count": 0,
+            "pending_task_ids": [],
+            "active_task_ids": [],
+        }
 
 
 def set_process_service(service: ProcessService):
@@ -43,6 +65,12 @@ def set_batch_generation_service(service: BatchGenerationService):
     """设置全局 BatchGenerationService 实例"""
     global _batch_generation_service_instance
     _batch_generation_service_instance = service
+
+
+def set_execution_queue_service(service: ExecutionQueueService):
+    """设置全局 ExecutionQueueService 实例"""
+    global _execution_queue_service_instance
+    _execution_queue_service_instance = service
 
 
 # 服务依赖注入
@@ -89,3 +117,10 @@ def get_batch_generation_service() -> BatchGenerationService:
     if _batch_generation_service_instance is None:
         raise RuntimeError("BatchGenerationService 未初始化")
     return _batch_generation_service_instance
+
+
+def get_execution_queue_service() -> ExecutionQueueService:
+    """获取执行队列服务实例"""
+    if _execution_queue_service_instance is None:
+        return _NullExecutionQueueService()
+    return _execution_queue_service_instance

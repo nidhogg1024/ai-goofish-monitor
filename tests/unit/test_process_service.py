@@ -88,10 +88,10 @@ def test_process_service_reindexes_runtime_maps_after_delete():
 
     service.reindex_after_delete(1)
 
-    assert service.processes == {0: proc_a, 1: proc_c}
-    assert service.log_paths == {0: "a.log", 1: "c.log"}
-    assert service.task_names == {0: "A", 1: "C"}
-    assert service.exit_watchers == {0: watcher_a, 1: watcher_c}
+    assert service.processes == {0: proc_a, 2: proc_c}
+    assert service.log_paths == {0: "a.log", 2: "c.log"}
+    assert service.task_names == {0: "A", 2: "C"}
+    assert service.exit_watchers == {0: watcher_a, 2: watcher_c}
 
 
 def test_process_service_adds_debug_limit_arg_when_env_enabled(monkeypatch):

@@ -25,7 +25,9 @@ import {
   Layers,
   MapPin,
   RefreshCcw,
-  Search
+  Search,
+  ChartColumn,
+  ScrollText,
 } from 'lucide-vue-next'
 import { formatCountdown, formatNextRunAbsolute } from '@/lib/taskSchedule'
 
@@ -68,12 +70,16 @@ const resolveAccountName = (task: Task) => {
 }
 
 const resolveCountdownText = (task: Task) => {
+  if (task.execution_state === 'queued' || task.is_queued) return '等待队列执行'
+  if (task.execution_state === 'running' || task.is_running) return '执行中'
   if (!task.cron) return t('tasks.table.manualTrigger')
   if (!task.enabled) return t('tasks.table.disabled')
   return formatCountdown(task.next_run_at, nowMs.value) || t('tasks.table.waitingSchedule')
 }
 
 const resolveCountdownTone = (task: Task) => {
+  if (task.execution_state === 'queued' || task.is_queued) return 'text-blue-600'
+  if (task.execution_state === 'running' || task.is_running) return 'text-emerald-600'
   if (!task.cron) return 'text-slate-400'
   if (!task.enabled) return 'text-slate-400'
   return 'text-amber-600'
@@ -84,6 +90,13 @@ const resolveNextRunLabel = (task: Task) => {
   return formatNextRunAbsolute(task.next_run_at)
 }
 
+const canStartTask = (task: Task) =>
+  task.enabled &&
+  !task.is_running &&
+  !task.is_queued &&
+  task.execution_state !== 'queued' &&
+  task.execution_state !== 'running'
+
 const emit = defineEmits<{
   (e: 'delete-task', taskId: number): void
   (e: 'run-task', taskId: number): void
@@ -91,6 +104,8 @@ const emit = defineEmits<{
   (e: 'edit-task', task: Task): void
   (e: 'refresh-criteria', task: Task): void
   (e: 'toggle-enabled', task: Task, enabled: boolean): void
+  (e: 'open-results', task: Task): void
+  (e: 'open-logs', task: Task): void
 }>()
 </script>
 
@@ -152,9 +167,13 @@ const emit = defineEmits<{
               />
               <Badge
                 variant="outline"
-                :class="task.is_running ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-500'"
+                :class="task.execution_state === 'running'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : task.execution_state === 'queued'
+                    ? 'border-blue-200 bg-blue-50 text-blue-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-500'"
               >
-                {{ task.is_running ? t('common.running') : t('common.idle') }}
+                {{ task.execution_state === 'running' ? t('common.running') : task.execution_state === 'queued' ? 'QUEUED' : t('common.idle') }}
               </Badge>
             </div>
           </div>
@@ -238,15 +257,16 @@ const emit = defineEmits<{
 
           <div class="mt-4 flex flex-wrap gap-2">
             <Button
-              v-if="!task.is_running"
+              v-if="task.execution_state !== 'running'"
               size="sm"
               class="flex-1 min-w-[120px]"
               :class="task.enabled ? '' : 'pointer-events-none opacity-50'"
+              :disabled="task.execution_state === 'queued'"
               :aria-label="`${t('tasks.table.start')} ${task.task_name}`"
               @click="emit('run-task', task.id)"
             >
               <Play class="mr-1 h-3.5 w-3.5 fill-current" />
-              {{ t('tasks.table.start') }}
+              {{ task.execution_state === 'queued' ? '已排队' : t('tasks.table.start') }}
             </Button>
             <Button
               v-else
@@ -260,6 +280,24 @@ const emit = defineEmits<{
               <Square v-if="!isStopping(task.id)" class="mr-1 h-3.5 w-3.5 fill-current" />
               <RefreshCcw v-else class="mr-1 h-3.5 w-3.5 animate-spin" />
               {{ isStopping(task.id) ? t('tasks.table.stopping') : t('tasks.table.stop') }}
+            </Button>
+            <Button
+              size="icon"
+              variant="outline"
+              class="size-10"
+              :aria-label="`查看 ${task.task_name} 的情报`"
+              @click="emit('open-results', task)"
+            >
+              <ChartColumn class="h-4 w-4" />
+            </Button>
+            <Button
+              size="icon"
+              variant="outline"
+              class="size-10"
+              :aria-label="`查看 ${task.task_name} 的日志`"
+              @click="emit('open-logs', task)"
+            >
+              <ScrollText class="h-4 w-4" />
             </Button>
             <Button
               size="icon"
@@ -464,16 +502,17 @@ const emit = defineEmits<{
             <TableCell class="px-6 align-middle text-right">
               <div class="flex justify-end items-center gap-2">
                   <Button
-                    v-if="!task.is_running"
+                    v-if="task.execution_state !== 'running' && !task.is_running"
                     size="sm" 
                     variant="default"
                     class="h-8 px-3 rounded-lg shadow-sm transition-all active:scale-95 text-white border-none"
-                    :class="task.enabled ? 'bg-primary hover:bg-primary/90' : 'bg-slate-200 text-slate-400 pointer-events-none opacity-50'"
+                    :class="canStartTask(task) ? 'bg-primary hover:bg-primary/90' : 'bg-slate-200 text-slate-400 pointer-events-none opacity-50'"
+                    :disabled="!canStartTask(task)"
                     :aria-label="`${t('tasks.table.start')} ${task.task_name}`"
                     @click="emit('run-task', task.id)"
                   >
                   <Play class="w-3 h-3 mr-1.5 fill-current" />
-                  <span class="font-bold text-[11px]">{{ t('tasks.table.start') }}</span>
+                  <span class="font-bold text-[11px]">{{ task.execution_state === 'queued' || task.is_queued ? '已排队' : t('tasks.table.start') }}</span>
                 </Button>
                   <Button
                     v-else
@@ -490,6 +529,26 @@ const emit = defineEmits<{
                 </Button>
 
                 <div class="flex items-center gap-0.5 ml-1">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    class="w-8 h-8 rounded-full text-slate-400 hover:text-primary hover:bg-primary/5 transition-colors"
+                    :aria-label="`查看 ${task.task_name} 的情报`"
+                    :title="`查看 ${task.task_name} 的情报`"
+                    @click="emit('open-results', task)"
+                  >
+                    <ChartColumn class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    class="w-8 h-8 rounded-full text-slate-400 hover:text-primary hover:bg-primary/5 transition-colors"
+                    :aria-label="`查看 ${task.task_name} 的日志`"
+                    :title="`查看 ${task.task_name} 的日志`"
+                    @click="emit('open-logs', task)"
+                  >
+                    <ScrollText class="w-3.5 h-3.5" />
+                  </Button>
                   <Button 
                     size="icon" 
                     variant="ghost" 

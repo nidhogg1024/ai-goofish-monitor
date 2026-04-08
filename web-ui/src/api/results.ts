@@ -9,6 +9,9 @@ export interface GetResultContentParams {
   sort_order?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+  category?: string | null;
+  group_name?: string | null;
+  task_name?: string | null;
 }
 
 export async function getResultFiles(): Promise<string[]> {
@@ -29,6 +32,18 @@ export async function getResultContent(
 
 export async function getResultInsights(filename: string): Promise<ResultInsights> {
   return await http(`/api/results/${filename}/insights`)
+}
+
+export async function getScopedResultContent(
+  params: GetResultContentParams = {}
+): Promise<{ total_items: number; items: ResultItem[] }> {
+  return await http('/api/results/query', { params: params as Record<string, any> })
+}
+
+export async function getScopedResultInsights(
+  params: Pick<GetResultContentParams, 'category' | 'group_name' | 'task_name'>
+): Promise<ResultInsights> {
+  return await http('/api/results/query/insights', { params: params as Record<string, any> })
 }
 
 export function buildResultExportUrl(filename: string, params: GetResultContentParams = {}): string {

@@ -1,13 +1,15 @@
 """
 结果文件管理路由
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from urllib.parse import quote
 
 from src.services.price_history_service import build_price_history_insights
+from src.domain.models.task import Task
 from src.services.result_export_service import build_results_csv
 from src.services.result_file_service import (
+    enrich_records_with_dynamic_price_insight,
     enrich_records_with_price_insight,
     validate_result_filename,
 )
@@ -16,9 +18,14 @@ from src.services.result_storage_service import (
     delete_result_file_records,
     list_result_filenames,
     load_all_result_records,
+    load_all_result_records_by_scope,
+    query_result_records_by_scope,
     query_result_records,
     result_file_exists,
 )
+from src.services.price_history_service import build_price_history_insights_for_keywords
+from src.api.dependencies import get_task_service
+from src.services.task_service import TaskService
 
 
 router = APIRouter(prefix="/api/results", tags=["results"])
@@ -37,6 +44,118 @@ def _build_download_headers(export_name: str) -> dict[str, str]:
             f"filename*=UTF-8''{encoded_name}"
         )
     }
+
+
+def _filter_tasks_by_scope(
+    tasks: list[Task],
+    *,
+    category: str | None,
+    group_name: str | None,
+    task_name: str | None,
+) -> list[Task]:
+    filtered = tasks
+    if category:
+        filtered = [task for task in filtered if (task.category or "") == category]
+    if group_name:
+        filtered = [task for task in filtered if (task.group_name or "") == group_name]
+    if task_name:
+        filtered = [task for task in filtered if task.task_name == task_name]
+    return filtered
+
+
+def _build_scope_payload(tasks: list[Task]) -> dict[str, list[str]]:
+    keywords = [str(task.keyword or "").strip() for task in tasks if str(task.keyword or "").strip()]
+    task_names = [str(task.task_name or "").strip() for task in tasks if str(task.task_name or "").strip()]
+    return {
+        "keywords": keywords,
+        "task_names": task_names,
+    }
+
+
+@router.get("/query")
+async def query_results_by_scope(
+    category: str | None = Query(None),
+    group_name: str | None = Query(None),
+    task_name: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    recommended_only: bool = Query(False),
+    ai_recommended_only: bool = Query(False),
+    keyword_recommended_only: bool = Query(False),
+    sort_by: str = Query("crawl_time"),
+    sort_order: str = Query("desc"),
+    task_service: TaskService = Depends(get_task_service),
+):
+    if ai_recommended_only and keyword_recommended_only:
+        raise HTTPException(status_code=400, detail="AI推荐筛选与关键词推荐筛选不能同时开启。")
+    if recommended_only and not ai_recommended_only and not keyword_recommended_only:
+        ai_recommended_only = True
+
+    tasks = await task_service.get_all_tasks()
+    scoped_tasks = _filter_tasks_by_scope(
+        tasks,
+        category=category,
+        group_name=group_name,
+        task_name=task_name,
+    )
+    if not scoped_tasks:
+        return {"total_items": 0, "page": page, "limit": limit, "items": []}
+    scope = _build_scope_payload(scoped_tasks)
+    total_items, items = await query_result_records_by_scope(
+        keywords=scope["keywords"],
+        task_names=scope["task_names"],
+        ai_recommended_only=ai_recommended_only,
+        keyword_recommended_only=keyword_recommended_only,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        limit=limit,
+    )
+    return {
+        "total_items": total_items,
+        "page": page,
+        "limit": limit,
+        "items": enrich_records_with_dynamic_price_insight(items),
+    }
+
+
+@router.get("/query/insights")
+async def query_result_insights_by_scope(
+    category: str | None = Query(None),
+    group_name: str | None = Query(None),
+    task_name: str | None = Query(None),
+    task_service: TaskService = Depends(get_task_service),
+):
+    tasks = await task_service.get_all_tasks()
+    scoped_tasks = _filter_tasks_by_scope(
+        tasks,
+        category=category,
+        group_name=group_name,
+        task_name=task_name,
+    )
+    if not scoped_tasks:
+        return {
+            "market_summary": {
+                "sample_count": 0,
+                "avg_price": None,
+                "median_price": None,
+                "min_price": None,
+                "max_price": None,
+                "snapshot_time": None,
+            },
+            "history_summary": {
+                "unique_items": 0,
+                "sample_count": 0,
+                "avg_price": None,
+                "median_price": None,
+                "min_price": None,
+                "max_price": None,
+            },
+            "daily_trend": [],
+            "latest_snapshot_at": None,
+        }
+    keywords = [str(task.keyword or "").strip() for task in scoped_tasks if str(task.keyword or "").strip()]
+    return build_price_history_insights_for_keywords(keywords)
 
 
 @router.get("/files")

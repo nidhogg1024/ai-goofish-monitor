@@ -18,6 +18,8 @@ TASK_INTENT_PROMPT = """
 输出字段必须包含：
 {
   "task_name": "给用户看的简短任务名",
+  "category": "任务分类，例如扫地机器人/手机数码",
+  "group_name": "任务组名称，例如租房两猫",
   "keyword": "适合闲鱼搜索的精简关键词",
   "min_price": null,
   "max_price": null,
@@ -32,6 +34,8 @@ TASK_INTENT_PROMPT = """
 
 规则：
 1. task_name 要简洁自然，适合展示在任务列表里。
+1.1 category 尽量提炼成用户真正的品类，例如扫地机器人、手机数码、相机影像。
+1.2 group_name 表达这次购买意图，例如租房两猫、主力机升级、样机与库存；没有明显意图时用“<category>关注池”。
 2. keyword 要尽量短，只保留品牌、型号、核心规格，不要把预算、卖家要求、成色要求塞进去。
 3. 如果用户提到了预算上限、最高价、xxx以内，提取到 max_price。
 4. 如果用户提到了最低价、至少多少钱，再提取 min_price；没提就填 null。
@@ -111,6 +115,8 @@ def _fallback_payload(description: str) -> Dict[str, Any]:
     keyword = _infer_keyword_from_description(description)
     return {
         "task_name": _infer_task_name(description, keyword),
+        "category": None,
+        "group_name": None,
         "keyword": keyword,
         "min_price": None,
         "max_price": _infer_max_price(description),
@@ -139,6 +145,8 @@ def _normalize_ai_payload(payload: Dict[str, Any], description: str) -> Dict[str
     normalized.update(
         {
             "task_name": task_name or normalized["task_name"],
+            "category": _normalize_optional_text(payload.get("category")),
+            "group_name": _normalize_optional_text(payload.get("group_name")),
             "keyword": keyword or normalized["keyword"],
             "min_price": min_price,
             "max_price": max_price or normalized["max_price"],
@@ -200,6 +208,10 @@ async def enrich_generate_request(req: TaskGenerateRequest) -> TaskGenerateReque
 
     parsed = await parse_task_intent(description)
     req.task_name = task_name or parsed.get("task_name") or _infer_task_name(description, keyword or "")
+    if not req.category and parsed.get("category"):
+        req.category = parsed["category"]
+    if not req.group_name and parsed.get("group_name"):
+        req.group_name = parsed["group_name"]
     req.keyword = keyword or parsed.get("keyword") or _infer_keyword_from_description(description)
 
     if req.min_price is None and parsed.get("min_price") is not None:

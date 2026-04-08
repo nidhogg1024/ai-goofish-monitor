@@ -13,7 +13,10 @@ from typing import Any, Dict, Optional
 
 from playwright.async_api import async_playwright
 
+from src.failure_guard import FailureGuard
 from src.infrastructure.config.env_manager import env_manager
+from src.infrastructure.config.settings import settings as app_settings
+from src.risk_control_guard import GlobalRiskControlGuard
 from src.scraper import _is_login_url, _resolve_browser_channel
 from src.services.account_state_service import prepare_account_path, register_account_path
 
@@ -21,11 +24,16 @@ from src.services.account_state_service import prepare_account_path, register_ac
 ACTIVE_JOB_STATUSES = {"launching", "awaiting_scan", "saving"}
 AUTH_COOKIE_NAMES = {"tracknick", "cookie2", "unb"}
 DEFAULT_STATE_FILE = "xianyu_state.json"
+_JOB_RETENTION_SECONDS = 600
 LOGIN_ENTRY_SELECTORS = (
     "text=登录",
     "text=去登录",
     "button:has-text('登录')",
     "a:has-text('登录')",
+)
+TASK_FAILURE_GUARD = FailureGuard()
+GLOBAL_RISK_GUARD = GlobalRiskControlGuard(
+    cooldown_seconds=app_settings.risk_control_cooldown_seconds
 )
 
 
@@ -51,8 +59,21 @@ class BrowserLoginService:
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
+    def _purge_stale_jobs(self) -> None:
+        """Remove completed jobs older than _JOB_RETENTION_SECONDS."""
+        now = time.monotonic()
+        stale = [
+            jid
+            for jid, job in self._jobs.items()
+            if job["status"] not in ACTIVE_JOB_STATUSES
+            and now - job.get("_finished_mono", now) > _JOB_RETENTION_SECONDS
+        ]
+        for jid in stale:
+            self._jobs.pop(jid, None)
+
     async def start_job(self, account_name: str, *, set_as_default: bool = True) -> Dict[str, Any]:
         async with self._lock:
+            self._purge_stale_jobs()
             for job in self._jobs.values():
                 if job["status"] in ACTIVE_JOB_STATUSES:
                     raise RuntimeError("已有扫码登录任务正在进行，请先完成当前任务。")
@@ -276,6 +297,9 @@ class BrowserLoginService:
                 default_state_path.parent.mkdir(parents=True, exist_ok=True)
             await asyncio.to_thread(default_state_path.write_text, serialized, "utf-8")
 
+        TASK_FAILURE_GUARD.reset_all()
+        GLOBAL_RISK_GUARD.clear()
+
     async def _build_snapshot(self, storage_state: Dict[str, Any], page) -> Dict[str, Any]:
         metadata = await page.evaluate(
             """() => ({
@@ -326,6 +350,7 @@ class BrowserLoginService:
             job["updated_at"] = _utc_timestamp()
             if updates.get("status") in {"completed", "failed", "cancelled"}:
                 job["finished_at"] = _utc_timestamp()
+                job["_finished_mono"] = time.monotonic()
 
     def _serialize_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
         return {

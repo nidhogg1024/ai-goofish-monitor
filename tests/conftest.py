@@ -21,6 +21,15 @@ from src.services.task_service import TaskService
 from src.services.task_generation_service import TaskGenerationService
 
 
+@pytest.fixture(autouse=True)
+def _reset_stream_required_state():
+    """Prevent _stream_required global state from leaking between tests."""
+    import src.services.ai_request_compat as compat
+    original = compat._stream_required
+    yield
+    compat._stream_required = original
+
+
 @pytest.fixture()
 def fixtures_dir() -> Path:
     return Path(__file__).parent / "fixtures"
@@ -99,6 +108,40 @@ class FakeSchedulerService:
         return self.next_run_times.get(task_id)
 
 
+class FakeExecutionQueueService:
+    def __init__(self, process_service: FakeProcessService):
+        self.process_service = process_service
+        self.enqueued = []
+        self.cancelled = []
+        self.pending_task_ids = set()
+        self.active_task_ids = set()
+
+    async def enqueue_task(self, task_id: int, task_name: str, *, source: str = "scheduler") -> bool:
+        if task_id in self.pending_task_ids or task_id in self.active_task_ids:
+            return False
+        self.pending_task_ids.add(task_id)
+        self.enqueued.append((task_id, task_name, source))
+        self.pending_task_ids.discard(task_id)
+        self.active_task_ids.add(task_id)
+        await self.process_service.start_task(task_id, task_name)
+        self.active_task_ids.discard(task_id)
+        return True
+
+    def cancel_task(self, task_id: int) -> bool:
+        self.cancelled.append(task_id)
+        self.pending_task_ids.discard(task_id)
+        return True
+
+    def snapshot(self):
+        return {
+            "worker_count": 1,
+            "queue_size": len(self.pending_task_ids),
+            "active_count": len(self.active_task_ids),
+            "pending_task_ids": sorted(self.pending_task_ids),
+            "active_task_ids": sorted(self.active_task_ids),
+        }
+
+
 @pytest.fixture()
 def api_context(tmp_path):
     config_file = tmp_path / "config.json"
@@ -113,6 +156,7 @@ def api_context(tmp_path):
     process_service = FakeProcessService()
     scheduler_service = FakeSchedulerService()
     task_generation_service = TaskGenerationService()
+    execution_queue_service = FakeExecutionQueueService(process_service)
 
     app = FastAPI()
     app.include_router(tasks.router)
@@ -129,6 +173,9 @@ def api_context(tmp_path):
     def override_get_task_generation_service():
         return task_generation_service
 
+    def override_get_execution_queue_service():
+        return execution_queue_service
+
     async def mark_started(task_id: int):
         await task_service.update_task_status(task_id, True)
 
@@ -143,6 +190,7 @@ def api_context(tmp_path):
     app.dependency_overrides[deps.get_process_service] = override_get_process_service
     app.dependency_overrides[deps.get_scheduler_service] = override_get_scheduler_service
     app.dependency_overrides[deps.get_task_generation_service] = override_get_task_generation_service
+    app.dependency_overrides[deps.get_execution_queue_service] = override_get_execution_queue_service
 
     return {
         "app": app,
@@ -151,6 +199,7 @@ def api_context(tmp_path):
         "process_service": process_service,
         "scheduler_service": scheduler_service,
         "task_generation_service": task_generation_service,
+        "execution_queue_service": execution_queue_service,
     }
 
 

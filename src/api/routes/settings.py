@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from src.api.dependencies import get_process_service
+from src.api.dependencies import get_execution_queue_service, get_process_service
 from src.infrastructure.config.env_manager import env_manager
 from src.infrastructure.config.settings import (
     AISettings,
@@ -26,7 +26,9 @@ from src.services.ai_request_compat import (
     create_ai_response_sync,
     is_chat_completions_api_unsupported_error,
     is_responses_api_unsupported_error,
+    is_stream_required_by_gateway,
     is_stream_required_error,
+    mark_stream_required,
 )
 from src.services.ai_response_parser import extract_ai_response_content
 from src.services.ai_base_url import normalize_openai_base_url
@@ -42,13 +44,14 @@ from src.services.notification_config_service import (
 )
 from src.services.notification_service import build_notification_service
 from src.services.process_service import ProcessService
+from src.services.execution_queue_service import ExecutionQueueService
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 AI_TEST_PROMPT = "Reply with OK only."
 AI_TEST_MAX_OUTPUT_TOKENS = 32
 AI_MODEL_PROBE_CACHE_TTL_SECONDS = 600
-AI_MODEL_PROBE_CONCURRENCY = 4
+AI_MODEL_PROBE_CONCURRENCY = 2
 
 _AI_MODEL_PROBE_CACHE: dict[tuple[str, str], dict] = {}
 
@@ -159,6 +162,14 @@ def _get_cached_probe_result(base_url: str, model: str) -> dict | None:
     return dict(cached)
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    msg = str(exc).lower()
+    return "rate limit" in msg or "too many requests" in msg or "ratelimit" in msg
+
+
 def _run_ai_test_request(
     *,
     api_key: str,
@@ -166,13 +177,14 @@ def _run_ai_test_request(
     proxy_url: str,
     model_name: str,
 ) -> dict:
+    import time
     from openai import OpenAI
 
-    use_stream = False
+    use_stream = is_stream_required_by_gateway()
     client_params = {
         "api_key": api_key,
         "base_url": base_url,
-        "timeout": httpx.Timeout(30.0),
+        "timeout": httpx.Timeout(45.0),
     }
     if proxy_url:
         client_params["http_client"] = httpx.Client(proxy=proxy_url)
@@ -180,6 +192,7 @@ def _run_ai_test_request(
     client = OpenAI(**client_params)
     messages = [{"role": "user", "content": AI_TEST_PROMPT}]
     api_mode = CHAT_COMPLETIONS_API_MODE
+    rate_limit_retries = 0
 
     while True:
         try:
@@ -202,9 +215,14 @@ def _run_ai_test_request(
         except Exception as exc:
             if api_mode == CHAT_COMPLETIONS_API_MODE and is_stream_required_error(exc) and not use_stream:
                 use_stream = True
+                mark_stream_required()
                 continue
             if api_mode == CHAT_COMPLETIONS_API_MODE and is_chat_completions_api_unsupported_error(exc):
                 api_mode = RESPONSES_API_MODE
+                continue
+            if _is_rate_limit_error(exc) and rate_limit_retries < 2:
+                rate_limit_retries += 1
+                time.sleep(2 * rate_limit_retries)
                 continue
             return {
                 "success": False,
@@ -383,6 +401,7 @@ async def update_rotation_settings(settings: RotationSettingsModel):
 @router.get("/status")
 async def get_system_status(
     process_service: ProcessService = Depends(get_process_service),
+    execution_queue_service: ExecutionQueueService = Depends(get_execution_queue_service),
 ):
     state_file = "xianyu_state.json"
     login_state_exists = os.path.exists(state_file)
@@ -405,6 +424,7 @@ async def get_system_status(
         "running_in_docker": scraper_settings.running_in_docker,
         "scraper_running": len(running_task_ids) > 0,
         "running_task_ids": running_task_ids,
+        "execution_queue": execution_queue_service.snapshot(),
         "login_state_file": {
             "exists": login_state_exists,
             "path": state_file,

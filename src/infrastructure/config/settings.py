@@ -106,6 +106,10 @@ class AppSettings(_EnvSettings):
     web_username: str = _env_field("admin", "WEB_USERNAME")
     web_password: str = _env_field("admin123", "WEB_PASSWORD")
     task_log_retention_days: int = _env_field(7, "TASK_LOG_RETENTION_DAYS", ge=1)
+    scheduler_max_concurrent_tasks: int = _env_field(2, "SCHEDULER_MAX_CONCURRENT_TASKS", ge=1)
+    scheduler_jitter_seconds: int = _env_field(45, "SCHEDULER_JITTER_SECONDS", ge=0)
+    scheduler_misfire_grace_seconds: int = _env_field(180, "SCHEDULER_MISFIRE_GRACE_SECONDS", ge=1)
+    risk_control_cooldown_seconds: int = _env_field(20 * 60, "RISK_CONTROL_COOLDOWN_SECONDS", ge=60)
 
     # 文件路径配置
     config_file: str = "config.json"

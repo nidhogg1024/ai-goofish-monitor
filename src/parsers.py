@@ -5,13 +5,125 @@ from src.config import AI_DEBUG_MODE
 from src.utils import safe_get
 
 
+def _looks_like_result_item(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    serialized = json.dumps(item, ensure_ascii=False)
+    markers = ("itemId", "targetUrl", "picUrl", "title", "price", "main")
+    return any(marker in serialized for marker in markers)
+
+
+def _extract_result_items(payload) -> list:
+    if isinstance(payload, list):
+        if payload and all(isinstance(item, dict) for item in payload) and any(
+            _looks_like_result_item(item) for item in payload
+        ):
+            return payload
+        for item in payload:
+            nested = _extract_result_items(item)
+            if nested:
+                return nested
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    preferred_paths = (
+        ("data", "resultList"),
+        ("data", "cardList"),
+        ("resultList",),
+        ("cardList",),
+        ("data", "data", "resultList"),
+        ("data", "data", "cardList"),
+    )
+    for path in preferred_paths:
+        current = payload
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        if isinstance(current, list) and current:
+            if any(_looks_like_result_item(item) for item in current if isinstance(item, dict)):
+                return current
+
+    for value in payload.values():
+        nested = _extract_result_items(value)
+        if nested:
+            return nested
+    return []
+
+
+def _extract_main_data(item: dict) -> dict:
+    candidates = (
+        item.get("data", {}).get("item", {}).get("main", {}).get("exContent"),
+        item.get("data", {}).get("item", {}).get("main"),
+        item.get("item", {}).get("main", {}).get("exContent"),
+        item.get("item", {}).get("main"),
+        item.get("main", {}).get("exContent"),
+        item.get("main"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def _extract_click_args(item: dict) -> dict:
+    candidates = (
+        item.get("data", {}).get("item", {}).get("main", {}).get("clickParam", {}).get("args"),
+        item.get("item", {}).get("main", {}).get("clickParam", {}).get("args"),
+        item.get("main", {}).get("clickParam", {}).get("args"),
+        item.get("clickParam", {}).get("args"),
+        item.get("args"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def _extract_target_url(item: dict, click_params: dict) -> str:
+    candidates = (
+        item.get("data", {}).get("item", {}).get("main", {}).get("targetUrl"),
+        item.get("item", {}).get("main", {}).get("targetUrl"),
+        item.get("main", {}).get("targetUrl"),
+        item.get("targetUrl"),
+        click_params.get("targetUrl"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _normalize_price(price_parts) -> str:
+    if isinstance(price_parts, list):
+        price = "".join(
+            [str(p.get("text", "")) for p in price_parts if isinstance(p, dict)]
+        ).replace("当前价", "").strip()
+        if "万" in price:
+            return f"¥{float(price.replace('¥', '').replace('万', '')) * 10000:.0f}"
+        return price or "价格异常"
+    if isinstance(price_parts, dict):
+        text = str(price_parts.get("text") or price_parts.get("price") or "").strip()
+        return text or "价格异常"
+    if price_parts is None:
+        return "价格异常"
+    return str(price_parts).strip() or "价格异常"
+
+
 async def _parse_search_results_json(json_data: dict, source: str) -> list:
     """解析搜索API的JSON数据，返回基础商品信息列表。"""
     page_data = []
     try:
-        items = await safe_get(json_data, "data", "resultList", default=[])
+        items = _extract_result_items(json_data)
         if not items:
-            print(f"LOG: ({source}) API响应中未找到商品列表 (resultList)。")
+            print(f"LOG: ({source}) API响应中未找到商品列表。")
+            if isinstance(json_data, dict):
+                top_level_keys = list(json_data.keys())[:10]
+                data_keys = list((json_data.get("data") or {}).keys())[:10] if isinstance(json_data.get("data"), dict) else []
+                print(f"LOG: ({source}) 顶层keys={top_level_keys} data.keys={data_keys}")
             if AI_DEBUG_MODE:
                 print(f"--- [SEARCH DEBUG] RAW JSON RESPONSE from {source} ---")
                 print(json.dumps(json_data, ensure_ascii=False, indent=2))
@@ -19,19 +131,22 @@ async def _parse_search_results_json(json_data: dict, source: str) -> list:
             return []
 
         for item in items:
-            main_data = await safe_get(item, "data", "item", "main", "exContent", default={})
-            click_params = await safe_get(item, "data", "item", "main", "clickParam", "args", default={})
+            main_data = _extract_main_data(item)
+            click_params = _extract_click_args(item)
 
             title = await safe_get(main_data, "title", default="未知标题")
+            if "没有找到你想要的宝贝" in str(title) or "小闲鱼没有找到" in str(title):
+                continue
             price_parts = await safe_get(main_data, "price", default=[])
-            price = "".join([str(p.get("text", "")) for p in price_parts if isinstance(p, dict)]).replace("当前价", "").strip() if isinstance(price_parts, list) else "价格异常"
-            if "万" in price: price = f"¥{float(price.replace('¥', '').replace('万', '')) * 10000:.0f}"
+            price = _normalize_price(price_parts)
             area = await safe_get(main_data, "area", default="地区未知")
             seller = await safe_get(main_data, "userNickName", default="匿名卖家")
-            raw_link = await safe_get(item, "data", "item", "main", "targetUrl", default="")
+            raw_link = _extract_target_url(item, click_params)
             image_url = await safe_get(main_data, "picUrl", default="")
             pub_time_ts = click_params.get("publishTime", "")
             item_id = await safe_get(main_data, "itemId", default="未知ID")
+            if item_id == "未知ID":
+                item_id = click_params.get("itemId") or item.get("itemId") or "未知ID"
             original_price = await safe_get(main_data, "oriPrice", default="暂无")
             wants_count = await safe_get(click_params, "wantNum", default='NaN')
 
@@ -55,7 +170,8 @@ async def _parse_search_results_json(json_data: dict, source: str) -> list:
                 "卖家昵称": seller,
                 "商品链接": raw_link.replace("fleamarket://", "https://www.goofish.com/"),
                 "发布时间": datetime.fromtimestamp(int(pub_time_ts)/1000).strftime("%Y-%m-%d %H:%M") if pub_time_ts.isdigit() else "未知时间",
-                "商品ID": item_id
+                "商品ID": item_id,
+                "商品主图链接": image_url,
             })
         print(f"LOG: ({source}) 成功解析到 {len(page_data)} 条商品基础信息。")
         return page_data

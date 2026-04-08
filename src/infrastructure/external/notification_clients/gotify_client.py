@@ -34,14 +34,17 @@ class GotifyClient(NotificationClient):
 
         message = self._build_message(product_data, reason)
         payload = {
-            "title": (None, message.notification_title),
-            "message": (None, message.content),
-            "priority": (None, "5"),
+            "title": message.notification_title,
+            "message": message.content,
+            "priority": 5,
         }
-        final_url = f"{self.gotify_url}/message?token={self.gotify_token}"
+        final_url = f"{self.gotify_url}/message"
+        headers = {"X-Gotify-Key": self.gotify_token}
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
-            lambda: requests.post(final_url, files=payload, timeout=10),
+            lambda: requests.post(
+                final_url, json=payload, headers=headers, timeout=10
+            ),
         )
         response.raise_for_status()

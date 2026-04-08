@@ -45,6 +45,8 @@ from src.utils import (
 )
 from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem
 from src.failure_guard import FailureGuard
+from src.infrastructure.config.settings import settings as app_settings
+from src.risk_control_guard import GlobalRiskControlGuard
 from src.services.account_strategy_service import resolve_account_runtime_plan
 from src.infrastructure.persistence.storage_names import build_result_filename
 from src.services.item_analysis_dispatcher import (
@@ -62,6 +64,7 @@ from src.services.search_pagination import (
     advance_search_page,
     is_search_results_response,
 )
+from src.task_item_matcher import match_task_item
 
 
 class RiskControlError(Exception):
@@ -195,7 +198,12 @@ async def _wait_for_login(page, context, state_file: str, *, timeout: int = _LOG
 
 
 FAILURE_GUARD = FailureGuard()
+GLOBAL_RISK_GUARD = GlobalRiskControlGuard(
+    cooldown_seconds=app_settings.risk_control_cooldown_seconds
+)
 EDGE_DOCKER_WARNING_PRINTED = False
+MANUAL_VERIFICATION_ALERT_INTERVAL = 600
+_manual_verification_alerts: dict[str, float] = {}
 
 
 def _is_login_url(url: str) -> bool:
@@ -216,6 +224,45 @@ def _resolve_browser_channel() -> str:
             EDGE_DOCKER_WARNING_PRINTED = True
         return "chromium"
     return "msedge" if LOGIN_IS_EDGE else "chrome"
+
+
+def _should_send_manual_verification_alert(task_key: str) -> bool:
+    now = time.monotonic()
+    last_sent_at = _manual_verification_alerts.get(task_key)
+    if last_sent_at and now - last_sent_at < MANUAL_VERIFICATION_ALERT_INTERVAL:
+        return False
+    _manual_verification_alerts[task_key] = now
+    return True
+
+
+async def _notify_manual_verification_required(
+    *,
+    task_name: str,
+    keyword: str,
+    target_url: Optional[str],
+    reason: str,
+) -> None:
+    task_key = f"{task_name}|{keyword}|{reason}"
+    if not _should_send_manual_verification_alert(task_key):
+        print(f"手动验证提醒已在冷却中，跳过重复通知: {task_name}")
+        return
+
+    product_data = {
+        "商品标题": f"[需要人工验证] {task_name}",
+        "当前售价": "N/A",
+        "商品链接": target_url or "https://www.goofish.com/",
+    }
+    notify_reason = (
+        f"任务触发闲鱼登录/风控验证，需要你手动完成一次验证。"
+        f"\n任务: {task_name}"
+        f"\n关键词: {keyword or 'N/A'}"
+        f"\n原因: {reason}"
+        f"\n系统已自动打开可见浏览器窗口。完成验证后会自动保存登录态并继续任务。"
+    )
+    try:
+        await send_ntfy_notification(product_data, notify_reason)
+    except Exception as exc:
+        print(f"发送人工验证提醒失败: {exc}")
 
 
 def _should_analyze_images(task_config: dict) -> bool:
@@ -371,11 +418,11 @@ def _get_seller_profile_cache_ttl(task_config: dict) -> int:
 
 def _default_context_options() -> dict:
     return {
-        "user_agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-        "viewport": {"width": 412, "height": 915},
-        "device_scale_factor": 2.625,
-        "is_mobile": True,
-        "has_touch": True,
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "viewport": {"width": 1440, "height": 900},
+        "device_scale_factor": 2,
+        "is_mobile": False,
+        "has_touch": False,
         "locale": "zh-CN",
         "timezone_id": "Asia/Shanghai",
         "permissions": ["geolocation"],
@@ -464,6 +511,8 @@ def _build_extra_headers(raw_headers: Optional[dict]) -> dict:
 async def _interactive_recover_session(
     state_file: str,
     *,
+    task_name: str,
+    keyword: str,
     target_url: Optional[str],
     reason: str,
     proxy_server: Optional[str] = None,
@@ -475,6 +524,19 @@ async def _interactive_recover_session(
     print("即将临时打开一个可见浏览器窗口，请手动完成扫码或验证。")
     print("完成后系统会自动保存登录状态，并回到无头模式继续重试。")
     print("=" * 66 + "\n")
+
+    GLOBAL_RISK_GUARD.activate(
+        task_name=task_name,
+        keyword=keyword,
+        reason=reason,
+    )
+
+    await _notify_manual_verification_required(
+        task_name=task_name,
+        keyword=keyword,
+        target_url=target_url,
+        reason=reason,
+    )
 
     snapshot_data = None
     if os.path.exists(state_file):
@@ -522,10 +584,15 @@ async def _interactive_recover_session(
             try:
                 await context.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [
+                            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+                            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                            {name: 'Native Client', filename: 'internal-nacl-plugin'},
+                        ]
+                    });
                     Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
                     window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
-                    Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5});
                 """)
             except Exception:
                 pass
@@ -547,6 +614,7 @@ async def _interactive_recover_session(
                         await asyncio.sleep(1.0)
                         continue
                     await _save_storage_state(context, state_file)
+                    GLOBAL_RISK_GUARD.clear()
                     print(f"✅ 交互恢复成功，登录状态已更新到 {state_file}")
                     return True
                 await asyncio.sleep(1.5)
@@ -566,7 +634,7 @@ async def scrape_user_profile(context, user_id: str) -> dict:
     page = await context.new_page()
 
     # 为各项异步任务准备Future和数据容器
-    head_api_future = asyncio.get_event_loop().create_future()
+    head_api_future = asyncio.get_running_loop().create_future()
 
     all_items, all_ratings = [], []
     stop_item_scrolling, stop_rating_scrolling = asyncio.Event(), asyncio.Event()
@@ -667,6 +735,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     根据单个任务配置，异步爬取闲鱼商品数据，并对每个新发现的商品进行实时的、独立的AI分析和通知。
     """
     keyword = task_config["keyword"]
+    task_name = task_config.get("task_name", "未命名任务")
     max_pages = task_config.get("max_pages", 1)
     personal_only = task_config.get("personal_only", False)
     min_price = task_config.get("min_price")
@@ -690,10 +759,14 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     historical_snapshots = load_price_snapshots(keyword)
     result_filename = build_result_filename(keyword)
     processed_links = load_processed_link_keys(keyword)
-    if processed_links:
-        print(f"LOG: 发现已存在结果集 {result_filename}，已加载 {len(processed_links)} 个历史商品用于去重。")
+
+    is_cold_start = len(processed_links) == 0
+    if is_cold_start:
+        effective_max_pages = task_config.get("first_scan_max_pages", 10)
+        print(f"LOG: 冷启动模式：结果集 {result_filename} 为空，首次扫描将拉取 {effective_max_pages} 页（综合排序）")
     else:
-        print(f"LOG: 结果集 {result_filename} 当前为空，将写入新记录。")
+        effective_max_pages = max_pages
+        print(f"LOG: 增量模式：已有 {len(processed_links)} 条历史数据，将扫描 {effective_max_pages} 页（新发布排序）")
 
     rotation_settings = _get_rotation_settings(task_config)
     account_items = load_state_files(rotation_settings["account_state_dir"])
@@ -772,7 +845,6 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
 
         async with async_playwright() as p:
-            # 反检测启动参数
             launch_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
@@ -829,22 +901,17 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 saver=save_to_jsonl,
             )
 
-            # 增强反检测脚本（模拟真实移动设备）
             await context.add_init_script("""
-                // 移除webdriver标识
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-
-                // 模拟真实移动设备的navigator属性
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                        {name: 'Native Client', filename: 'internal-nacl-plugin'},
+                    ]
+                });
                 Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
-
-                // 添加chrome对象
                 window.chrome = {runtime: {}, loadTimes: function() {}, csi: function() {}};
-
-                // 模拟触摸支持
-                Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5});
-
-                // 覆盖permissions查询（避免暴露自动化）
                 const originalQuery = window.navigator.permissions.query;
                 window.navigator.permissions.query = (parameters) => (
                     parameters.name === 'notifications' ?
@@ -867,13 +934,22 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 await random_sleep(1, 2)
 
                 # 模拟随机滚动（移动设备的触摸滚动）
-                await page.evaluate("window.scrollBy(0, Math.random() * 500 + 200)")
+                try:
+                    await page.evaluate("window.scrollBy(0, Math.random() * 500 + 200)")
+                except Exception as e:
+                    if "Execution context was destroyed" in str(e):
+                        log_time("首页仍在跳转，跳过一次滚动模拟。")
+                        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    else:
+                        raise
                 await random_sleep(1, 2)
 
                 log_time("步骤 1 - 导航到搜索结果页...")
-                # 使用 'q' 参数构建正确的搜索URL，并进行URL编码
-                params = {"q": keyword}
+                actual_search_term = task_config.get("search_query") or keyword
+                params = {"q": actual_search_term}
                 search_url = f"https://www.goofish.com/search?{urlencode(params)}"
+                if actual_search_term != keyword:
+                    log_time(f"宽搜索模式：搜索词 '{actual_search_term}'，过滤词 '{keyword}'")
                 log_time(f"目标URL: {search_url}")
 
                 # 先监听搜索接口响应，再执行导航，避免错过首次请求
@@ -887,6 +963,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
+                            task_name=task_name,
+                            keyword=keyword,
                             target_url=search_url,
                             reason=f"跳转到登录页: {page.url}",
                             proxy_server=proxy_server,
@@ -913,6 +991,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         if RUN_HEADLESS:
                             recovered = await _interactive_recover_session(
                                 state_file,
+                                task_name=task_name,
+                                keyword=keyword,
                                 target_url=search_url,
                                 reason=f"等待搜索页时跳转到登录页: {page.url}",
                                 proxy_server=proxy_server,
@@ -947,6 +1027,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
+                            task_name=task_name,
+                            keyword=keyword,
                             target_url=page.url,
                             reason="触发 baxia-dialog 验证弹窗",
                             proxy_server=proxy_server,
@@ -980,6 +1062,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
+                            task_name=task_name,
+                            keyword=keyword,
                             target_url=page.url,
                             reason="触发 J_MIDDLEWARE_FRAME_WIDGET 验证弹窗",
                             proxy_server=proxy_server,
@@ -1011,20 +1095,25 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
                 final_response = None
                 log_time("步骤 2 - 应用筛选条件...")
-                if new_publish_option:
+                effective_publish_option = ""
+                if is_cold_start:
+                    log_time("冷启动模式：跳过新发布排序，使用默认综合排序以获取更广泛的数据")
+                else:
+                    effective_publish_option = new_publish_option if new_publish_option else "最新"
+                    log_time(f"增量模式：强制启用新发布排序 → {effective_publish_option}")
+                if effective_publish_option:
                     try:
                         await page.click("text=新发布")
-                        await random_sleep(1, 2)  # 原来是 (1.5, 2.5)
+                        await random_sleep(1, 2)
                         async with page.expect_response(
                             is_search_results_response, timeout=20000
                         ) as response_info:
-                            await page.click(f"text={new_publish_option}")
-                            # --- 修改: 增加排序后的等待时间 ---
-                            await random_sleep(2, 4)  # 原来是 (3, 5)
+                            await page.click(f"text={effective_publish_option}")
+                            await random_sleep(2, 4)
                         final_response = await response_info.value
                     except PlaywrightTimeoutError:
                         log_time(
-                            f"新发布筛选 '{new_publish_option}' 请求超时，继续执行。"
+                            f"新发布筛选 '{effective_publish_option}' 请求超时，继续执行。"
                         )
                     except Exception as e:
                         print(f"LOG: 应用新发布筛选失败: {e}")
@@ -1152,36 +1241,6 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     except Exception as e:
                         print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {e}")
 
-                if min_price or max_price:
-                    price_container = page.locator(
-                        'div[class*="search-price-input-container"]'
-                    ).first
-                    if await price_container.is_visible():
-                        if min_price:
-                            await price_container.get_by_placeholder("¥").first.fill(
-                                min_price
-                            )
-                            # --- 修改: 将固定等待改为随机等待 ---
-                            await random_sleep(1, 2.5)  # 原来是 asyncio.sleep(5)
-                        if max_price:
-                            await (
-                                price_container.get_by_placeholder("¥")
-                                .nth(1)
-                                .fill(max_price)
-                            )
-                            # --- 修改: 将固定等待改为随机等待 ---
-                            await random_sleep(1, 2.5)  # 原来是 asyncio.sleep(5)
-
-                        async with page.expect_response(
-                            is_search_results_response, timeout=20000
-                        ) as response_info:
-                            await page.keyboard.press("Tab")
-                            # --- 修改: 增加确认价格后的等待时间 ---
-                            await random_sleep(2, 4)  # 原来是 asyncio.sleep(5)
-                        final_response = await response_info.value
-                    else:
-                        print("LOG: 警告 - 未找到价格输入容器。")
-
                 log_time("所有筛选已完成，开始处理商品列表...")
 
                 current_response = (
@@ -1189,10 +1248,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     if final_response and final_response.ok
                     else initial_response
                 )
-                for page_num in range(1, max_pages + 1):
+                for page_num in range(1, effective_max_pages + 1):
                     if stop_scraping:
                         break
-                    log_time(f"开始处理第 {page_num}/{max_pages} 页 ...")
+                    log_time(f"开始处理第 {page_num}/{effective_max_pages} 页 ...")
 
                     if page_num > 1:
                         page_advance_result = await advance_search_page(
@@ -1212,6 +1271,52 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     )
                     if not basic_items:
                         break
+
+                    if min_price or max_price:
+                        price_floor = float(min_price) * 0.7 if min_price else 0
+                        price_ceil = float(max_price) * 1.3 if max_price else float("inf")
+                        before_price_filter = len(basic_items)
+
+                        def _extract_price(item: dict) -> float:
+                            raw = str(item.get("当前售价") or "0")
+                            raw = raw.replace("¥", "").replace(",", "").strip()
+                            try:
+                                return float(raw)
+                            except (ValueError, TypeError):
+                                return 0.0
+
+                        basic_items = [
+                            item for item in basic_items
+                            if price_floor <= _extract_price(item) <= price_ceil
+                        ]
+                        price_filtered = before_price_filter - len(basic_items)
+                        if price_filtered > 0:
+                            log_time(
+                                f"[价格过滤] 过滤掉 {price_filtered} 条价格不在"
+                                f" {price_floor:.0f}-{price_ceil:.0f} 范围的商品"
+                            )
+                        if not basic_items:
+                            continue
+
+                    filtered_basic_items = []
+                    filtered_out_count = 0
+                    for item in basic_items:
+                        is_match, mismatch_reason = match_task_item(task_config, item)
+                        if not is_match:
+                            filtered_out_count += 1
+                            log_time(
+                                f"[硬过滤] 跳过候选商品 '{str(item.get('商品标题') or '')[:40]}'：{mismatch_reason}"
+                            )
+                            continue
+                        filtered_basic_items.append(item)
+                    if filtered_out_count:
+                        log_time(
+                            f"[硬过滤] 第 {page_num} 页过滤掉 {filtered_out_count} 条不匹配结果，保留 {len(filtered_basic_items)} 条。"
+                        )
+                    basic_items = filtered_basic_items
+                    if not basic_items:
+                        log_time(f"第 {page_num} 页过滤后无有效候选，继续下一页。")
+                        continue
                     historical_snapshots.extend(
                         record_market_snapshots(
                             keyword=keyword,
@@ -1224,6 +1329,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     )
 
                     total_items_on_page = len(basic_items)
+                    page_new_count = 0
+                    page_seen_count = 0
                     for i, item_data in enumerate(basic_items, 1):
                         if debug_limit > 0 and processed_item_count >= debug_limit:
                             log_time(
@@ -1234,10 +1341,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
                         unique_key = get_link_unique_key(item_data["商品链接"])
                         if unique_key in processed_links:
+                            page_seen_count += 1
                             log_time(
                                 f"[页内进度 {i}/{total_items_on_page}] 商品 '{item_data['商品标题'][:20]}...' 已存在，跳过。"
                             )
                             continue
+                        page_new_count += 1
 
                         log_time(
                             f"[页内进度 {i}/{total_items_on_page}] 发现新商品，获取详情: {item_data['商品标题'][:30]}..."
@@ -1329,7 +1438,50 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 item_data["浏览量"] = await safe_get(
                                     item_do, "browseCnt", default="-"
                                 )
-                                # ...[此处可添加更多从详情页解析出的商品信息]...
+
+                                detail_desc = await safe_get(
+                                    item_do, "desc", default=""
+                                )
+                                if detail_desc:
+                                    item_data["商品描述"] = detail_desc
+
+                                props_list = await safe_get(
+                                    item_do, "newItemProperties", default=[]
+                                )
+                                if not props_list:
+                                    props_list = await safe_get(
+                                        item_do, "itemProperties", default=[]
+                                    )
+                                if props_list and isinstance(props_list, list):
+                                    structured_attrs = {}
+                                    for prop in props_list:
+                                        if not isinstance(prop, dict):
+                                            continue
+                                        label = (
+                                            prop.get("label")
+                                            or prop.get("key")
+                                            or prop.get("name")
+                                            or ""
+                                        ).strip()
+                                        value = (
+                                            prop.get("value")
+                                            or prop.get("text")
+                                            or prop.get("content")
+                                            or ""
+                                        ).strip()
+                                        if label and value:
+                                            structured_attrs[label] = value
+                                    if structured_attrs:
+                                        item_data["商品属性"] = structured_attrs
+
+                                is_final_match, final_mismatch_reason = match_task_item(
+                                    task_config, item_data
+                                )
+                                if not is_final_match:
+                                    log_time(
+                                        f"[硬过滤] 详情校验未通过，跳过 '{item_data['商品标题'][:40]}'：{final_mismatch_reason}"
+                                    )
+                                    continue
 
                                 user_id = await safe_get(seller_do, "sellerId")
 
@@ -1407,18 +1559,25 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             # --- 修改: 增加关闭页面后的短暂整理时间 ---
                             await random_sleep(2, 4)  # 原来是 (1, 2.5)
 
-                    # --- 新增: 在处理完一页所有商品后，翻页前，增加一个更长的“休息”时间 ---
-                    if not stop_scraping and page_num < max_pages:
-                        print(
-                            f"--- 第 {page_num} 页处理完毕，准备翻页。执行一次页面间的长时休息... ---"
+                    if not is_cold_start and page_new_count == 0 and page_seen_count > 0:
+                        log_time(
+                            f"增量模式：第 {page_num} 页全部 {page_seen_count} 个商品已扫描过，提前结束翻页。"
                         )
-                        await random_sleep(10, 15)
+                        stop_scraping = True
+
+                    if not stop_scraping and page_num < effective_max_pages:
+                        print(
+                            f"--- 第 {page_num} 页处理完毕（新 {page_new_count} / 旧 {page_seen_count}），准备翻到下一页。执行页面间休息... ---"
+                        )
+                        await random_sleep(5, 10)
 
             except PlaywrightTimeoutError as e:
                 if _is_login_url(page.url):
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
+                            task_name=task_name,
+                            keyword=keyword,
                             target_url=search_url,
                             reason=f"超时后跳转到登录页: {page.url}",
                             proxy_server=proxy_server,
@@ -1446,6 +1605,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     if RUN_HEADLESS:
                         recovered = await _interactive_recover_session(
                             state_file,
+                            task_name=task_name,
+                            keyword=keyword,
                             target_url=search_url,
                             reason=f"异常中触发 passport 登录流: {e}",
                             proxy_server=proxy_server,
@@ -1468,7 +1629,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 log_time("任务执行完毕，浏览器将在5秒后自动关闭...")
                 await asyncio.sleep(5)
                 if debug_limit:
-                    input("按回车键关闭浏览器...")
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, input, "按回车键关闭浏览器..."
+                    )
                 await browser.close()
 
         return processed_item_count

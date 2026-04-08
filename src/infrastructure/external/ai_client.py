@@ -23,8 +23,10 @@ from src.services.ai_request_compat import (
     is_chat_completions_api_unsupported_error,
     is_json_output_unsupported_error,
     is_responses_api_unsupported_error,
+    is_stream_required_by_gateway,
     is_stream_required_error,
     is_temperature_unsupported_error,
+    mark_stream_required,
     remove_temperature_param,
 )
 from src.services.ai_response_parser import (
@@ -57,15 +59,18 @@ class AIClient:
             return None
 
         try:
+            import httpx
+            client_kwargs: dict = {
+                "api_key": self.settings.api_key,
+                "base_url": self.settings.base_url,
+            }
             if self.settings.proxy_url:
                 print(f"正在为 AI 请求使用代理: {self.settings.proxy_url}")
-                os.environ['HTTP_PROXY'] = self.settings.proxy_url
-                os.environ['HTTPS_PROXY'] = self.settings.proxy_url
+                client_kwargs["http_client"] = httpx.AsyncClient(
+                    proxy=self.settings.proxy_url,
+                )
 
-            return AsyncOpenAI(
-                api_key=self.settings.api_key,
-                base_url=self.settings.base_url
-            )
+            return AsyncOpenAI(**client_kwargs)
         except Exception as e:
             print(f"初始化 AI 客户端失败: {e}")
             return None
@@ -160,7 +165,7 @@ class AIClient:
             else enable_json_output
         )
         use_temperature = True
-        use_stream = False
+        use_stream = is_stream_required_by_gateway()
         max_attempts = 4
 
         for attempt in range(max_attempts):
@@ -211,8 +216,9 @@ class AIClient:
                     print("当前服务未实现 Responses API，正在自动回退到 Chat Completions API")
                 if api_mode == CHAT_COMPLETIONS_API_MODE and not use_stream and is_stream_required_error(exc):
                     use_stream = True
+                    mark_stream_required()
                     changed = True
-                    print("当前网关要求 stream=true，正在自动回退到流式 Chat Completions")
+                    print("当前网关要求 stream=true，后续所有请求将自动启用流式模式")
                 if use_response_format and is_json_output_unsupported_error(exc):
                     use_response_format = False
                     changed = True

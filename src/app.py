@@ -24,6 +24,7 @@ from src.api.dependencies import (
     set_scheduler_service,
     set_task_generation_service,
     set_batch_generation_service,
+    set_execution_queue_service,
 )
 from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
@@ -31,7 +32,9 @@ from src.services.scheduler_service import SchedulerService
 from src.services.task_log_cleanup_service import cleanup_task_logs
 from src.services.task_generation_service import TaskGenerationService
 from src.services.batch_generation_service import BatchGenerationService
+from src.services.execution_queue_service import ExecutionQueueService
 from src.services.browser_login_service import browser_login_service
+from src.services.task_schedule_service import rebalance_existing_task_crons
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.config.settings import settings as app_settings
@@ -39,7 +42,8 @@ from src.infrastructure.config.settings import settings as app_settings
 
 # 全局服务实例
 process_service = ProcessService()
-scheduler_service = SchedulerService(process_service)
+execution_queue_service = ExecutionQueueService(process_service)
+scheduler_service = SchedulerService(execution_queue_service)
 task_generation_service = TaskGenerationService()
 batch_generation_service = BatchGenerationService()
 
@@ -63,6 +67,7 @@ process_service.set_lifecycle_hooks(
 
 # 设置全局 ProcessService 实例供依赖注入使用
 set_process_service(process_service)
+set_execution_queue_service(execution_queue_service)
 set_scheduler_service(scheduler_service)
 set_task_generation_service(task_generation_service)
 set_batch_generation_service(batch_generation_service)
@@ -71,21 +76,36 @@ set_batch_generation_service(batch_generation_service)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    import asyncio
     # 启动时
     print("正在启动应用...")
-    bootstrap_sqlite_storage()
-    cleanup_task_logs(keep_days=app_settings.task_log_retention_days)
+    await asyncio.to_thread(bootstrap_sqlite_storage)
+    await asyncio.to_thread(cleanup_task_logs, keep_days=app_settings.task_log_retention_days)
 
     # 重置所有任务状态为停止
     task_repo = SqliteTaskRepository()
     task_service = TaskService(task_repo)
     tasks_list = await task_service.get_all_tasks()
 
+    rebalanced_tasks = rebalance_existing_task_crons(tasks_list)
+    if any(updated.cron != original.cron for original, updated in zip(tasks_list, rebalanced_tasks)):
+        print("正在自动打散已有任务的默认调度时间...")
+        persisted_tasks = []
+        for original, updated in zip(tasks_list, rebalanced_tasks):
+            if updated.cron != original.cron:
+                print(
+                    f"  -> 任务 '{updated.task_name}' 调度已从 '{original.cron}' 调整为 '{updated.cron}'"
+                )
+                await task_repo.save(updated)
+            persisted_tasks.append(updated)
+        tasks_list = persisted_tasks
+
     for task in tasks_list:
         if task.is_running:
             await task_service.update_task_status(task.id, False)
 
     # 加载定时任务
+    await execution_queue_service.start()
     await scheduler_service.reload_jobs(tasks_list)
     scheduler_service.start()
 
@@ -96,6 +116,7 @@ async def lifespan(app: FastAPI):
     # 关闭时
     print("正在关闭应用...")
     scheduler_service.stop()
+    await execution_queue_service.stop()
     await process_service.stop_all()
     await browser_login_service.shutdown()
     print("应用已关闭")

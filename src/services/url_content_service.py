@@ -113,12 +113,10 @@ async def _fetch_bilibili_comments(html: str) -> str:
     bili_headers = {**_HEADERS, "Referer": "https://www.bilibili.com"}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers=bili_headers) as client:
-        # 获取热门主评论（nohot=0 避免未登录 -400 错误）
-        api_url = (
-            f"https://api.bilibili.com/x/v2/reply"
-            f"?type={comment_type}&oid={oid}&sort=1&ps=20&nohot=0"
+        resp = await client.get(
+            "https://api.bilibili.com/x/v2/reply",
+            params={"type": comment_type, "oid": oid, "sort": 1, "ps": 20, "nohot": 0},
         )
-        resp = await client.get(api_url)
         data = resp.json()
 
         if data.get("code") != 0:
@@ -143,12 +141,11 @@ async def _fetch_bilibili_comments(html: str) -> str:
             rcount = reply.get("rcount", 0)
             rpid = reply.get("rpid")
             if rcount > 0 and rpid:
-                sub_url = (
-                    f"https://api.bilibili.com/x/v2/reply/reply"
-                    f"?oid={oid}&type={comment_type}&root={rpid}&ps=10&pn=1"
-                )
                 try:
-                    sub_resp = await client.get(sub_url)
+                    sub_resp = await client.get(
+                        "https://api.bilibili.com/x/v2/reply/reply",
+                        params={"oid": oid, "type": comment_type, "root": rpid, "ps": 10, "pn": 1},
+                    )
                     sub_data = sub_resp.json()
                     sub_replies = sub_data.get("data", {}).get("replies") or []
                     for sub in sub_replies:

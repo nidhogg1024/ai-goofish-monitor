@@ -43,8 +43,10 @@ from src.services.ai_request_compat import (
     is_chat_completions_api_unsupported_error,
     is_json_output_unsupported_error,
     is_responses_api_unsupported_error,
+    is_stream_required_by_gateway,
     is_stream_required_error,
     is_temperature_unsupported_error,
+    mark_stream_required,
     remove_temperature_param,
 )
 from src.services.notification_service import build_notification_service
@@ -374,7 +376,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
     api_mode = CHAT_COMPLETIONS_API_MODE
     use_response_format = ENABLE_RESPONSE_FORMAT
     use_temperature = True
-    use_stream = False
+    use_stream = is_stream_required_by_gateway()
     for attempt in range(max_retries):
         try:
             # 根据重试次数调整参数
@@ -429,7 +431,9 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                     return parsed_response
                 safe_print(f"   [AI分析] 第{attempt + 1}次尝试格式验证失败")
                 if attempt < max_retries - 1:
-                    safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
+                    backoff = min(2 ** attempt, 8)
+                    safe_print(f"   [AI分析] {backoff}秒后进行第{attempt + 2}次重试...")
+                    await asyncio.sleep(backoff)
                     continue
                 raise ValueError("AI响应格式缺少必需字段或字段类型不正确。")
             except json.JSONDecodeError as e:
@@ -461,8 +465,9 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 )
             if api_mode == CHAT_COMPLETIONS_API_MODE and not use_stream and is_stream_required_error(e):
                 use_stream = True
+                mark_stream_required()
                 safe_print(
-                    "   [AI分析] 当前网关要求 stream=true，后续重试将自动启用流式 Chat Completions。"
+                    "   [AI分析] 当前网关要求 stream=true，后续所有请求将自动启用流式模式。"
                 )
             if use_response_format and is_json_output_unsupported_error(e):
                 use_response_format = False
@@ -481,7 +486,9 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 safe_print("-------------------------------------\n")
             safe_print(f"   [AI分析] 第{attempt + 1}次尝试AI调用失败: {e}")
             if attempt < max_retries - 1:
-                safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
+                backoff = min(2 ** attempt, 8)
+                safe_print(f"   [AI分析] {backoff}秒后进行第{attempt + 2}次重试...")
+                await asyncio.sleep(backoff)
                 continue
             else:
                 raise e

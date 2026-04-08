@@ -3,20 +3,30 @@
 负责管理定时任务的调度
 """
 from datetime import datetime
+from collections import defaultdict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import List
 
-from src.core.cron_utils import build_cron_trigger
+from src.core.cron_utils import build_cron_trigger, normalize_cron_expression
 from src.domain.models.task import Task
-from src.services.process_service import ProcessService
+from src.infrastructure.config.settings import settings as app_settings
+from src.services.execution_queue_service import ExecutionQueueService
 
 
 class SchedulerService:
     """调度服务"""
 
-    def __init__(self, process_service: ProcessService):
-        self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
-        self.process_service = process_service
+    def __init__(self, execution_queue_service: ExecutionQueueService):
+        self.scheduler = AsyncIOScheduler(
+            timezone="Asia/Shanghai",
+            job_defaults={
+                "coalesce": True,
+                "max_instances": 1,
+                "misfire_grace_time": app_settings.scheduler_misfire_grace_seconds,
+            },
+        )
+        self.execution_queue_service = execution_queue_service
+        self.jitter_seconds = app_settings.scheduler_jitter_seconds
 
     def start(self):
         """启动调度器"""
@@ -53,13 +63,19 @@ class SchedulerService:
         """重新加载所有定时任务"""
         print("正在重新加载定时任务...")
         self.scheduler.remove_all_jobs()
+        grouped_tasks: dict[str, list[Task]] = defaultdict(list)
 
         for task in tasks:
             if task.enabled and task.cron:
+                grouped_tasks[normalize_cron_expression(task.cron) or task.cron].append(task)
+
+        for normalized_cron, cron_tasks in grouped_tasks.items():
+            for index, task in enumerate(sorted(cron_tasks, key=lambda item: (item.id or 0, item.task_name))):
                 try:
-                    trigger = build_cron_trigger(
-                        task.cron,
-                        timezone=self.scheduler.timezone,
+                    trigger = self._build_staggered_trigger(
+                        normalized_cron,
+                        index=index,
+                        group_size=len(cron_tasks),
                     )
                     self.scheduler.add_job(
                         self._run_task,
@@ -67,9 +83,13 @@ class SchedulerService:
                         args=[task.id, task.task_name],
                         id=f"task_{task.id}",
                         name=f"Scheduled: {task.task_name}",
-                        replace_existing=True
+                        replace_existing=True,
+                        jitter=self.jitter_seconds,
                     )
-                    print(f"  -> 已为任务 '{task.task_name}' 添加定时规则: '{task.cron}'")
+                    print(
+                        f"  -> 已为任务 '{task.task_name}' 添加定时规则: '{task.cron}'"
+                        f" (错峰组 {index + 1}/{len(cron_tasks)})"
+                    )
                 except ValueError as e:
                     print(f"  -> [警告] 任务 '{task.task_name}' 的 Cron 表达式无效: {e}")
 
@@ -77,5 +97,49 @@ class SchedulerService:
 
     async def _run_task(self, task_id: int, task_name: str):
         """执行定时任务"""
-        print(f"定时任务触发: 正在为任务 '{task_name}' 启动爬虫...")
-        await self.process_service.start_task(task_id, task_name)
+        print(f"定时任务触发: 任务 '{task_name}' 进入执行队列...")
+        await self.execution_queue_service.enqueue_task(task_id, task_name, source="scheduler")
+
+    def _build_staggered_trigger(
+        self,
+        normalized_cron: str,
+        *,
+        index: int,
+        group_size: int,
+    ):
+        parts = normalized_cron.split()
+        if len(parts) == 5:
+            minute, hour, day, month, day_of_week = parts
+            staggered_minute = self._stagger_minute_field(minute, index=index, group_size=group_size)
+            expression = " ".join([staggered_minute, hour, day, month, day_of_week])
+            return build_cron_trigger(expression, timezone=self.scheduler.timezone)
+
+        if len(parts) == 6:
+            second, minute, hour, day, month, day_of_week = parts
+            staggered_minute = self._stagger_minute_field(minute, index=index, group_size=group_size)
+            expression = " ".join([second, staggered_minute, hour, day, month, day_of_week])
+            return build_cron_trigger(expression, timezone=self.scheduler.timezone)
+
+        return build_cron_trigger(normalized_cron, timezone=self.scheduler.timezone)
+
+    def _stagger_minute_field(self, minute_field: str, *, index: int, group_size: int) -> str:
+        normalized_minute = str(minute_field).strip()
+        if group_size <= 1:
+            return normalized_minute
+
+        step = self._extract_step(normalized_minute)
+        if step is None or step <= 1:
+            return normalized_minute
+
+        offset = index % step
+        return f"{offset}/{step}"
+
+    def _extract_step(self, minute_field: str) -> int | None:
+        text = minute_field.strip()
+        if text.startswith("*/") and text[2:].isdigit():
+            return int(text[2:])
+        if "/" in text:
+            start, step = text.split("/", 1)
+            if start.isdigit() and step.isdigit():
+                return int(step)
+        return None

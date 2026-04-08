@@ -100,16 +100,19 @@ export function useTasks() {
   async function startTask(taskId: number) {
     isLoading.value = true
     const task = tasks.value.find((t) => t.id === taskId)
-    const previous = task?.is_running
+    const previous = task ? { is_running: task.is_running, is_queued: task.is_queued, execution_state: task.execution_state } : null
     if (task) {
-      task.is_running = true // 乐观更新：点击后立刻显示运行中
+      task.is_queued = true
+      task.execution_state = 'queued'
     }
     try {
       await taskApi.startTask(taskId)
       // The websocket will update the status, but we can also optimistically update
     } catch (e) {
-      if (task && previous !== undefined) {
-        task.is_running = previous
+      if (task && previous) {
+        task.is_running = previous.is_running
+        task.is_queued = previous.is_queued
+        task.execution_state = previous.execution_state
       }
       if (e instanceof Error) error.value = e
       throw e

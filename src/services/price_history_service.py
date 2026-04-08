@@ -393,3 +393,42 @@ def build_price_history_insights(
         "daily_trend": _build_daily_trend(recent_snapshots),
         "latest_snapshot_at": snapshots[-1].get("snapshot_time"),
     }
+
+
+def build_price_history_insights_for_keywords(
+    keywords: list[str],
+    *,
+    window_days: int = DEFAULT_HISTORY_WINDOW_DAYS,
+) -> dict:
+    all_snapshots: list[dict] = []
+    for keyword in keywords:
+        all_snapshots.extend(load_price_snapshots(keyword))
+    if not all_snapshots:
+        return {
+            "market_summary": _summarize_prices([]),
+            "history_summary": {"unique_items": 0, **_summarize_prices([])},
+            "daily_trend": [],
+            "latest_snapshot_at": None,
+        }
+
+    all_snapshots.sort(key=lambda item: (str(item.get("snapshot_time") or ""), str(item.get("item_id") or "")))
+    recent_snapshots = _recent_window_snapshots(all_snapshots, window_days)
+    latest_snapshot_time = str(all_snapshots[-1].get("snapshot_time") or "")
+    latest_run_snapshots = _dedupe_latest(
+        [record for record in all_snapshots if str(record.get("snapshot_time") or "") == latest_snapshot_time],
+        "item_id",
+    )
+    latest_records_by_item = _dedupe_latest(recent_snapshots, "item_id")
+
+    return {
+        "market_summary": {
+            **_summarize_prices(latest_run_snapshots),
+            "snapshot_time": latest_snapshot_time or None,
+        },
+        "history_summary": {
+            "unique_items": len(latest_records_by_item),
+            **_summarize_prices(latest_records_by_item),
+        },
+        "daily_trend": _build_daily_trend(recent_snapshots),
+        "latest_snapshot_at": latest_snapshot_time or None,
+    }

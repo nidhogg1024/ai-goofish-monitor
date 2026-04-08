@@ -21,6 +21,50 @@ SORT_COLUMN_MAP = {
 }
 
 
+def _build_scope_query_conditions(
+    *,
+    filenames: list[str] | None = None,
+    keywords: list[str] | None = None,
+    task_names: list[str] | None = None,
+    ai_recommended_only: bool,
+    keyword_recommended_only: bool,
+) -> tuple[str, list]:
+    conditions: list[str] = []
+    params: list = []
+
+    normalized_filenames = [value for value in (filenames or []) if value]
+    normalized_keywords = [value for value in (keywords or []) if value]
+    normalized_task_names = [value for value in (task_names or []) if value]
+
+    if normalized_filenames:
+        placeholders = ", ".join("?" for _ in normalized_filenames)
+        conditions.append(f"result_filename IN ({placeholders})")
+        params.extend(normalized_filenames)
+    if normalized_keywords:
+        placeholders = ", ".join("?" for _ in normalized_keywords)
+        conditions.append(f"keyword IN ({placeholders})")
+        params.extend(normalized_keywords)
+    # 历史结果里的 task_name 存在空值和脏数据，范围查询优先依赖当前任务关键词。
+    # 只有在没有 filename/keyword 约束时，才退回 task_name 条件，避免把同组查询误筛成空。
+    if normalized_task_names and not normalized_filenames and not normalized_keywords:
+        placeholders = ", ".join("?" for _ in normalized_task_names)
+        conditions.append(f"task_name IN ({placeholders})")
+        params.extend(normalized_task_names)
+
+    if ai_recommended_only:
+        conditions.append("is_recommended = 1")
+        conditions.append("analysis_source = ?")
+        params.append("ai")
+    if keyword_recommended_only:
+        conditions.append("is_recommended = 1")
+        conditions.append("analysis_source = ?")
+        params.append("keyword")
+
+    if not conditions:
+        conditions.append("1 = 1")
+    return " AND ".join(conditions), params
+
+
 def _get_link_unique_key(link: str) -> str:
     return link.split("&", 1)[0]
 
@@ -256,6 +300,125 @@ def _load_all_result_records_sync(
     bootstrap_sqlite_storage()
     where_clause, params = _build_query_conditions(
         filename=filename,
+        ai_recommended_only=ai_recommended_only,
+        keyword_recommended_only=keyword_recommended_only,
+    )
+    order_clause = _sort_expression(sort_by, sort_order)
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT raw_json
+            FROM result_items
+            WHERE {where_clause}
+            ORDER BY {order_clause}
+            """,
+            tuple(params),
+        ).fetchall()
+    return [_parse_raw_record(str(row["raw_json"])) for row in rows]
+
+
+async def query_result_records_by_scope(
+    *,
+    filenames: list[str] | None = None,
+    keywords: list[str] | None = None,
+    task_names: list[str] | None = None,
+    ai_recommended_only: bool,
+    keyword_recommended_only: bool,
+    sort_by: str,
+    sort_order: str,
+    page: int,
+    limit: int,
+) -> tuple[int, list[dict]]:
+    return await asyncio.to_thread(
+        _query_result_records_by_scope_sync,
+        filenames,
+        keywords,
+        task_names,
+        ai_recommended_only,
+        keyword_recommended_only,
+        sort_by,
+        sort_order,
+        page,
+        limit,
+    )
+
+
+def _query_result_records_by_scope_sync(
+    filenames: list[str] | None,
+    keywords: list[str] | None,
+    task_names: list[str] | None,
+    ai_recommended_only: bool,
+    keyword_recommended_only: bool,
+    sort_by: str,
+    sort_order: str,
+    page: int,
+    limit: int,
+) -> tuple[int, list[dict]]:
+    bootstrap_sqlite_storage()
+    where_clause, params = _build_scope_query_conditions(
+        filenames=filenames,
+        keywords=keywords,
+        task_names=task_names,
+        ai_recommended_only=ai_recommended_only,
+        keyword_recommended_only=keyword_recommended_only,
+    )
+    offset = max(page - 1, 0) * limit
+    order_clause = _sort_expression(sort_by, sort_order)
+    with sqlite_connection() as conn:
+        total_row = conn.execute(
+            f"SELECT COUNT(1) AS total FROM result_items WHERE {where_clause}",
+            tuple(params),
+        ).fetchone()
+        rows = conn.execute(
+            f"""
+            SELECT raw_json
+            FROM result_items
+            WHERE {where_clause}
+            ORDER BY {order_clause}
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params + [limit, offset]),
+        ).fetchall()
+    total = int(total_row["total"]) if total_row else 0
+    return total, [_parse_raw_record(str(row["raw_json"])) for row in rows]
+
+
+async def load_all_result_records_by_scope(
+    *,
+    filenames: list[str] | None = None,
+    keywords: list[str] | None = None,
+    task_names: list[str] | None = None,
+    ai_recommended_only: bool,
+    keyword_recommended_only: bool,
+    sort_by: str,
+    sort_order: str,
+) -> list[dict]:
+    return await asyncio.to_thread(
+        _load_all_result_records_by_scope_sync,
+        filenames,
+        keywords,
+        task_names,
+        ai_recommended_only,
+        keyword_recommended_only,
+        sort_by,
+        sort_order,
+    )
+
+
+def _load_all_result_records_by_scope_sync(
+    filenames: list[str] | None,
+    keywords: list[str] | None,
+    task_names: list[str] | None,
+    ai_recommended_only: bool,
+    keyword_recommended_only: bool,
+    sort_by: str,
+    sort_order: str,
+) -> list[dict]:
+    bootstrap_sqlite_storage()
+    where_clause, params = _build_scope_query_conditions(
+        filenames=filenames,
+        keywords=keywords,
+        task_names=task_names,
         ai_recommended_only=ai_recommended_only,
         keyword_recommended_only=keyword_recommended_only,
     )

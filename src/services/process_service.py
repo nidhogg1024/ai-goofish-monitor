@@ -15,6 +15,8 @@ from src.ai_handler import send_ntfy_notification
 from src.config import STATE_FILE
 from src.failure_guard import FailureGuard
 from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync
+from src.infrastructure.config.settings import settings as app_settings
+from src.risk_control_guard import GlobalRiskControlGuard
 from src.utils import build_task_log_path
 
 STOP_TIMEOUT_SECONDS = 20
@@ -32,6 +34,9 @@ class ProcessService:
         self.task_names: Dict[int, str] = {}
         self.exit_watchers: Dict[int, asyncio.Task] = {}
         self.failure_guard = FailureGuard()
+        self.global_risk_guard = GlobalRiskControlGuard(
+            cooldown_seconds=app_settings.risk_control_cooldown_seconds
+        )
         self._on_started: LifecycleHook | None = None
         self._on_stopped: LifecycleHook | None = None
 
@@ -66,6 +71,21 @@ class ProcessService:
         """检查任务是否正在运行"""
         process = self.processes.get(task_id)
         return process is not None and process.returncode is None
+
+    def running_count(self) -> int:
+        """返回当前仍在运行的任务进程数。"""
+        running = 0
+        finished: list[int] = []
+        for task_id, process in self.processes.items():
+            if process.returncode is None:
+                running += 1
+            else:
+                finished.append(task_id)
+        for task_id in finished:
+            process = self.processes.get(task_id)
+            if process is not None:
+                self._cleanup_runtime(task_id, process)
+        return running
 
     async def _drain_finished_process(self, task_id: int) -> None:
         process = self.processes.get(task_id)
@@ -135,6 +155,19 @@ class ProcessService:
         await self._drain_finished_process(task_id)
         if self.is_running(task_id):
             print(f"任务 '{task_name}' (ID: {task_id}) 已在运行中")
+            return False
+
+        global_risk_decision = self.global_risk_guard.should_skip_start()
+        if global_risk_decision.skip:
+            paused_until = (
+                global_risk_decision.cooldown_until.strftime("%Y-%m-%d %H:%M:%S")
+                if global_risk_decision.cooldown_until
+                else "N/A"
+            )
+            print(
+                f"[GlobalRiskGuard] 跳过启动任务 '{task_name}'，当前处于全局风控冷却期。"
+                f" 原因: {global_risk_decision.reason}; 冷却到: {paused_until}"
+            )
             return False
 
         decision = self.failure_guard.should_skip_start(
@@ -283,22 +316,27 @@ class ProcessService:
             return
         await asyncio.shield(watcher)
 
-    def reindex_after_delete(self, deleted_task_id: int) -> None:
-        """删除任务后同步重排运行时索引，避免任务下标漂移。"""
-        self.processes = self._reindex_mapping(self.processes, deleted_task_id)
-        self.log_paths = self._reindex_mapping(self.log_paths, deleted_task_id)
-        self.log_handles = self._reindex_mapping(self.log_handles, deleted_task_id)
-        self.task_names = self._reindex_mapping(self.task_names, deleted_task_id)
-        self.exit_watchers = self._reindex_mapping(self.exit_watchers, deleted_task_id)
+    async def wait_for_task_exit(self, task_id: int) -> None:
+        """等待某个任务进程退出。若已退出则立即返回。"""
+        await self._drain_finished_process(task_id)
+        if not self.is_running(task_id):
+            return
+        await self._await_exit_watcher(task_id)
 
-    def _reindex_mapping(self, mapping: Dict[int, object], deleted_task_id: int) -> Dict[int, object]:
-        reindexed: Dict[int, object] = {}
-        for task_id, value in mapping.items():
-            if task_id == deleted_task_id:
-                continue
-            next_task_id = task_id - 1 if task_id > deleted_task_id else task_id
-            reindexed[next_task_id] = value
-        return reindexed
+    def reindex_after_delete(self, deleted_task_id: int) -> None:
+        """删除任务后从运行时索引中移除对应条目。
+
+        不再做 ID 减 1 重排，因为数据库中 task ID 不保证连续。
+        只需要移除被删除任务的映射即可。
+        """
+        for mapping in (
+            self.processes,
+            self.log_paths,
+            self.log_handles,
+            self.task_names,
+            self.exit_watchers,
+        ):
+            mapping.pop(deleted_task_id, None)
 
     async def stop_all(self) -> None:
         """停止所有任务进程"""

@@ -76,6 +76,8 @@ const zhCNExtra = {
       minPrice: '最低价',
       maxPrice: '最高价',
       maxPages: '搜索页数',
+      firstScanMaxPages: '首次扫描页数',
+      firstScanMaxPagesHint: '首次执行时广撒网拉取的页数，后续增量扫描使用上方的搜索页数',
       schedule: '定时规则',
       cronPresetTab: '预设',
       cronCustomTab: '自定义',

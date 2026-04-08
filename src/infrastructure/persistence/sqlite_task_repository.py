@@ -21,6 +21,8 @@ def _row_to_task(row) -> Task:
     payload["free_shipping"] = bool(payload["free_shipping"])
     payload["is_running"] = bool(payload["is_running"])
     payload["keyword_rules"] = json.loads(payload.pop("keyword_rules_json") or "[]")
+    if payload.get("first_scan_max_pages") is None:
+        payload["first_scan_max_pages"] = 10
     return Task(**payload)
 
 
@@ -88,14 +90,16 @@ class SqliteTaskRepository(TaskRepository):
             conn.execute(
                 """
                 INSERT OR REPLACE INTO tasks (
-                    id, task_name, enabled, keyword, description, analyze_images,
-                    max_pages, personal_only, min_price, max_price, cron,
+                    id, task_name, category, group_name, enabled, keyword, search_query,
+                    description, analyze_images,
+                    max_pages, first_scan_max_pages, personal_only, min_price, max_price, cron,
                     ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                     account_strategy, free_shipping, new_publish_option, region,
                     decision_mode, keyword_rules_json, is_running
                 ) VALUES (
-                    :id, :task_name, :enabled, :keyword, :description, :analyze_images,
-                    :max_pages, :personal_only, :min_price, :max_price, :cron,
+                    :id, :task_name, :category, :group_name, :enabled, :keyword, :search_query,
+                    :description, :analyze_images,
+                    :max_pages, :first_scan_max_pages, :personal_only, :min_price, :max_price, :cron,
                     :ai_prompt_base_file, :ai_prompt_criteria_file, :account_state_file,
                     :account_strategy, :free_shipping, :new_publish_option, :region,
                     :decision_mode, :keyword_rules_json, :is_running

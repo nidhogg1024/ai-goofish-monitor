@@ -11,11 +11,41 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import TaskRegionSelector from '@/components/tasks/TaskRegionSelector.vue'
 
+interface TaskFormState {
+  task_name: string
+  category: string
+  group_name: string
+  keyword: string
+  search_query: string
+  description: string
+  analyze_images: boolean
+  max_pages: number
+  first_scan_max_pages: number
+  personal_only: boolean
+  min_price: string | undefined
+  max_price: string | undefined
+  cron: string
+  account_strategy: 'auto' | 'fixed' | 'rotate'
+  account_state_file: string
+  free_shipping: boolean
+  new_publish_option: string
+  region: string
+  decision_mode: 'ai' | 'keyword'
+  keyword_rules?: string[]
+  enabled?: boolean
+  id?: number
+  is_running?: boolean
+  next_run_at?: string | null
+  ai_prompt_base_file?: string
+  ai_prompt_criteria_file?: string
+  [key: string]: unknown
+}
+
 type FormMode = 'create' | 'edit'
 type EmittedData = TaskGenerateRequest | Partial<Task>
 const AUTO_ACCOUNT_VALUE = '__auto__'
 const EMPTY_CRON_VALUE = '__manual__'
-const DEFAULT_CRON_VALUE = '*/15 * * * *'
+const DEFAULT_CRON_VALUE = '0 * * * *'
 
 const props = defineProps<{
   mode: FormMode
@@ -30,7 +60,7 @@ const emit = defineEmits<{
 }>()
 const { t } = useI18n()
 
-const form = ref<any>({})
+const form = ref<TaskFormState>({} as TaskFormState)
 const accountStrategy = ref<'auto' | 'fixed' | 'rotate'>('auto')
 const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
@@ -126,10 +156,14 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
   } else {
     form.value = {
       task_name: '',
+      category: '',
+      group_name: '',
       keyword: '',
+      search_query: '',
       description: '',
       analyze_images: true,
       max_pages: 3,
+      first_scan_max_pages: 10,
       personal_only: true,
       min_price: undefined,
       max_price: undefined,
@@ -267,6 +301,8 @@ function handleSubmit() {
   submitData.decision_mode = decisionMode
   submitData.account_strategy = currentAccountStrategy
   submitData.analyze_images = submitData.analyze_images !== false
+  submitData.category = String(submitData.category || '').trim() || null
+  submitData.group_name = String(submitData.group_name || '').trim() || null
   submitData.keyword_rules = decisionMode === 'keyword' ? keywordRules : []
   submitData.task_name = taskName || null
   submitData.keyword = keyword || null
@@ -295,6 +331,28 @@ function handleSubmit() {
         <p class="mt-1 text-blue-800/90">{{ t('tasks.form.quickCreateHint') }}</p>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="task-category" class="sm:text-right">任务分类</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="task-category"
+            v-model="form.category"
+            placeholder="例如：扫地机器人、手机数码、相机影像"
+          />
+          <p class="text-xs text-gray-500">不填也可以，系统会按任务内容自动归类。</p>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="task-group" class="sm:text-right">任务组</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="task-group"
+            v-model="form.group_name"
+            placeholder="例如：租房两猫、主力机升级、样机与库存"
+          />
+          <p class="text-xs text-gray-500">同一购买意图下的多个型号建议放在同一个任务组里。</p>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="task-name" class="sm:text-right">{{ t('tasks.form.taskName') }}</Label>
         <div class="space-y-1 sm:col-span-3">
           <Input
@@ -318,6 +376,17 @@ function handleSubmit() {
           <p v-if="allowAiAutofill" class="text-xs text-gray-500">
             {{ t('tasks.form.keywordAutoHint') }}
           </p>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="search-query" class="sm:text-right">搜索词</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Input
+            id="search-query"
+            v-model="form.search_query"
+            placeholder="例如：追觅扫地机器人（留空则使用上方关键词搜索）"
+          />
+          <p class="text-xs text-gray-500">用更宽泛的词搜索闲鱼，再靠关键词精准过滤型号。留空则直接用关键词搜索。</p>
         </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
@@ -384,6 +453,13 @@ function handleSubmit() {
         <Input id="max-pages" v-model.number="form.max_pages" type="number" class="sm:col-span-3" />
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label for="first-scan-max-pages" class="sm:text-right">{{ t('tasks.form.firstScanMaxPages') }}</Label>
+        <div class="sm:col-span-3">
+          <Input id="first-scan-max-pages" v-model.number="form.first_scan_max_pages" type="number" />
+          <p class="text-muted-foreground mt-1 text-xs">{{ t('tasks.form.firstScanMaxPagesHint') }}</p>
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
         <Label for="cron" class="sm:text-right">{{ t('tasks.form.schedule') }}</Label>
         <div class="space-y-2 sm:col-span-3">
           <Tabs v-model="cronMode" class="w-full">
@@ -391,6 +467,9 @@ function handleSubmit() {
               <TabsTrigger value="preset">{{ t('tasks.form.cronPresetTab') }}</TabsTrigger>
               <TabsTrigger value="custom">{{ t('tasks.form.cronCustomTab') }}</TabsTrigger>
             </TabsList>
+            <p class="mt-2 text-xs text-gray-500">
+              默认预设会结合当前已有任务自动打散执行时间，避免新任务都堆在同一分钟触发。
+            </p>
             <TabsContent value="preset">
               <Select v-model="presetCronValue">
                 <SelectTrigger>

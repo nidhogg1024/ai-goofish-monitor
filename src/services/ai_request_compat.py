@@ -1,11 +1,26 @@
 """AI 请求兼容性辅助逻辑。"""
 
 import copy
+import threading
 from typing import Any, Dict, Iterable, List
 
 
 RESPONSES_API_MODE = "responses"
 CHAT_COMPLETIONS_API_MODE = "chat_completions"
+
+_stream_required_lock = threading.Lock()
+_stream_required: bool = False
+
+
+def mark_stream_required() -> None:
+    """网关要求 stream=true 时调用，后续所有请求都会自动启用。"""
+    global _stream_required
+    with _stream_required_lock:
+        _stream_required = True
+
+
+def is_stream_required_by_gateway() -> bool:
+    return _stream_required
 INPUT_TEXT_TYPE = "input_text"
 INPUT_IMAGE_TYPE = "input_image"
 IMAGE_DETAIL_AUTO = "auto"
